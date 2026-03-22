@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>App信息查询工具</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>App 信息查询工具</h1>
+        <p class="subtitle">输入包名或App名称，查询App信息和下载地址</p>
+
+        <!-- 输入区域 -->
+        <div class="input-section">
+            <textarea id="packageInput" placeholder="输入包名或App名称，每行一个。例如：&#10;com.tencent.mm&#10;微信&#10;com.ss.android.ugc.aweme&#10;抖音" rows="5"></textarea>
+            <div class="btn-row">
+                <button id="btnQuery" class="btn btn-primary" onclick="doQuery()">查询 <span class="shortcut-hint">(Ctrl+Enter)</span></button>
+                <button class="btn btn-secondary" onclick="clearInput()">清空</button>
+                <label class="exact-search-label">
+                    <input type="checkbox" id="exactSearch">
+                    <span>精确搜索</span>
+                    <span class="settings-hint">（勾选后名称搜索只返回完全一致的App）</span>
+                </label>
+            </div>
+        </div>
+
+        <!-- 安卓商店排序设置 -->
+        <div class="settings-section">
+            <div class="settings-header">
+                <h3>安卓应用商店优先级</h3>
+                <span class="settings-hint">拖动调整顺序，排在前面的优先使用</span>
+            </div>
+            <div id="storeList" class="store-list">
+                <div class="store-item" draggable="true" data-store="xiaomi">
+                    <span class="drag-handle">&#x2630;</span>
+                    <span class="store-name">小米应用商店</span>
+                </div>
+                <div class="store-item" draggable="true" data-store="tencent">
+                    <span class="drag-handle">&#x2630;</span>
+                    <span class="store-name">腾讯应用宝</span>
+                </div>
+                <div class="store-item" draggable="true" data-store="wandoujia">
+                    <span class="drag-handle">&#x2630;</span>
+                    <span class="store-name">豌豆荚</span>
+                </div>
+                <div class="store-item" draggable="true" data-store="appchina">
+                    <span class="drag-handle">&#x2630;</span>
+                    <span class="store-name">应用汇</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 扩展查询选项 -->
+        <div class="settings-section extra-options-section">
+            <div class="settings-header">
+                <h3>扩展查询（仅安卓）</h3>
+                <span class="settings-hint">勾选后查询时间会增加，按需开启</span>
+            </div>
+            <div class="extra-options-row">
+                <label class="checkbox-label extra-opt-label">
+                    <input type="checkbox" id="getApkUrl">
+                    <span>获取APK直链</span>
+                </label>
+                <div id="apkUrlModeRow" class="apk-mode-row" style="display:none;">
+                    <label class="radio-label"><input type="radio" name="apkUrlMode" value="single" checked> 单个（找到即停）</label>
+                    <label class="radio-label"><input type="radio" name="apkUrlMode" value="multiple"> 多个（获取全部）</label>
+                </div>
+                <label class="checkbox-label extra-opt-label">
+                    <input type="checkbox" id="getSha1">
+                    <span>获取SHA1</span>
+                </label>
+            </div>
+        </div>
+
+        <!-- 历史记录 -->
+        <div class="history-section" id="historySection" style="display:none;">
+            <div class="history-header">
+                <div class="history-header-left">
+                    <h3>最近查询记录</h3>
+                    <label class="history-keep-label">
+                        <input type="checkbox" id="keepInInput">
+                        <span>保留在搜索框</span>
+                    </label>
+                </div>
+                <button class="btn-text" onclick="clearHistory()">清空历史</button>
+            </div>
+            <div id="historyList" class="history-list"></div>
+        </div>
+
+        <!-- 加载状态 -->
+        <div id="loading" class="loading" style="display:none;">
+            <div class="loading-top">
+                <div class="spinner"></div>
+                <span id="loadingText">正在查询中，请稍候...</span>
+            </div>
+            <div id="progressContainer" class="progress-container" style="display:none;">
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="progressText">0 / 0</span>
+                    <span id="progressEta"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 结果区域 -->
+        <div id="resultSection" class="result-section" style="display:none;">
+            <!-- 吸顶工具栏 -->
+            <div class="result-toolbar sticky-toolbar" id="resultToolbar">
+                <div class="toolbar-left">
+                    <h3>查询结果 (<span id="resultCount">0</span> 条)</h3>
+                </div>
+                <div class="toolbar-right">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="includeIcon"> 下载含图标链接
+                    </label>
+                    <label class="checkbox-label" title="将图标图片嵌入 XLSX（仅 XLSX 支持）">
+                        <input type="checkbox" id="includeIconImage"> 下载含图标图片
+                    </label>
+                    <button class="btn btn-small" onclick="copyAllResults()">复制全部</button>
+                    <button class="btn btn-small btn-primary" onclick="downloadResults('xlsx')">下载 XLSX</button>
+                    <button class="btn btn-small" onclick="downloadResults('csv')">下载 CSV</button>
+                </div>
+            </div>
+
+            <!-- 提示信息 -->
+            <div id="queryInfo" class="query-info" style="display:none;"></div>
+
+            <div class="table-wrapper">
+                <table id="resultTable">
+                    <thead>
+                        <tr>
+                            <th class="col-icon"></th>
+                            <th>App名称</th>
+                            <th>包名</th>
+                            <th>平台</th>
+                            <th>分类</th>
+                            <th>商店地址</th>
+                            <th class="col-apk-url" id="thApkUrl" style="display:none;">下载地址</th>
+                            <th class="col-sha1" id="thSha1" style="display:none;">SHA1</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 回到顶部按钮 -->
+    <button id="backToTop" class="back-to-top" onclick="scrollToTop()" title="回到顶部">&#x2191;</button>
+
+    <!-- Toast 提示 -->
+    <div id="toast" class="toast">已复制</div>
+
+    <script src="/static/main.js"></script>
+</body>
+</html>
