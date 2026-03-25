@@ -388,44 +388,67 @@ def search_appchina_by_name_full(name, limit=3):
 
 
 def search_pp(package_name):
-    """PP助手 - 按包名查询"""
+    """PP助手 (25pp.com) - 按包名查询"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    # 尝试通过搜索找到对应应用
     try:
-        search_url = f"https://www.pp.cn/soft/search.html?q={urllib.parse.quote(package_name)}"
+        search_url = f"https://www.25pp.com/?q={urllib.parse.quote(package_name)}"
         resp = requests.get(search_url, headers=headers, timeout=HTTP_TIMEOUT)
         if resp.status_code != 200:
             return None
         soup = BeautifulSoup(resp.text, "html.parser")
-        # 在搜索结果中找包含包名的应用链接
-        for link in soup.find_all("a", href=True):
-            href = link.get("href", "")
-            if package_name in href or package_name in resp.text:
-                break
-        # 尝试从页面文本中提取包名匹配的应用
+        # 包名必须出现在页面中（data-app-pname 或 data-pn）
         if package_name not in resp.text:
             return None
-        # 提取App名称（页面标题或第一个结果标题）
-        title_tag = soup.find("title")
-        app_name_tag = soup.find("h2") or soup.find("h3") or soup.find("strong")
-        app_name = app_name_tag.get_text(strip=True) if app_name_tag else ""
-        app_name = clean_app_name(app_name) if app_name else ""
+        # 找到第一个包名匹配的详情链接
+        detail_id = None
+        app_name = ""
+        icon_url = ""
+        # 查找 data-app-pname 或 data-pn 属性匹配包名的元素
+        for el in soup.find_all(attrs={"data-app-pname": package_name}):
+            detail_href = el.get("href", "") or ""
+            m = re.search(r'/detail/(\d+)', detail_href)
+            if m:
+                detail_id = m.group(1)
+                break
+        if not detail_id:
+            for el in soup.find_all(attrs={"data-pn": package_name}):
+                detail_href = el.get("href", "") or ""
+                m = re.search(r'/detail/(\d+)', detail_href)
+                if m:
+                    detail_id = m.group(1)
+                    break
+        # 如果没有精确属性，从链接中找
+        if not detail_id:
+            for a in soup.find_all("a", href=True):
+                if re.search(r'/detail/\d+', a.get("href", "")):
+                    m = re.search(r'/detail/(\d+)', a["href"])
+                    if m:
+                        detail_id = m.group(1)
+                        break
+        if not detail_id:
+            return None
+        detail_url = f"https://www.25pp.com/detail/{detail_id}"
+        # 获取详情页取 App 名和图标
+        dr = requests.get(detail_url, headers=headers, timeout=HTTP_TIMEOUT)
+        if dr.status_code == 200:
+            ds = BeautifulSoup(dr.text, "html.parser")
+            # App名: <span class="title" itemprop="name">
+            name_tag = ds.find("span", class_="title") or ds.find("p", class_="title")
+            if name_tag:
+                app_name = clean_app_name(name_tag.get_text(strip=True))
+            # 图标: <img> in <div class="app-icon">
+            icon_div = ds.find("div", class_="app-icon")
+            if icon_div:
+                img = icon_div.find("img")
+                if img:
+                    icon_url = img.get("src", "")
         if not app_name:
             return None
-        # 找应用详情链接
-        detail_url = ""
-        for a in soup.find_all("a", href=True):
-            href = a.get("href", "")
-            if re.search(r'/soft/\d+/', href) or re.search(r'/app/\d+', href):
-                detail_url = href if href.startswith("http") else "https://www.pp.cn" + href
-                break
-        if not detail_url:
-            detail_url = search_url
         return {
             "source": "PP助手",
             "app_name": app_name,
             "download_url": detail_url,
-            "icon_url": "",
+            "icon_url": icon_url,
             "category": "",
         }
     except Exception:
