@@ -3,16 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>App信息查询工具</title>
+    <title>lookup_appinfo</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
-        <h1>App 信息查询工具</h1>
-        <p class="subtitle">输入包名或App名称，查询App信息和下载地址</p>
 
         <!-- 输入区域 -->
         <div class="input-section">
+            <div class="input-top-bar">
+                <span class="input-title">App 信息查询</span>
+                <button class="btn-settings" onclick="openSettings()" title="设置">&#9881;</button>
+            </div>
             <textarea id="packageInput" placeholder="输入包名或App名称，每行一个。例如：&#10;com.tencent.mm&#10;微信&#10;com.ss.android.ugc.aweme&#10;抖音" rows="5"></textarea>
             <div class="btn-row">
                 <button id="btnQuery" class="btn btn-primary" onclick="doQuery()">查询 <span class="shortcut-hint">(Ctrl+Enter)</span></button>
@@ -22,54 +24,11 @@
                     <span>精确搜索</span>
                     <span class="settings-hint">（勾选后名称搜索只返回完全一致的App）</span>
                 </label>
-            </div>
-        </div>
-
-        <!-- 安卓商店排序设置 -->
-        <div class="settings-section">
-            <div class="settings-header">
-                <h3>安卓应用商店优先级</h3>
-                <span class="settings-hint">拖动调整顺序，排在前面的优先使用</span>
-            </div>
-            <div id="storeList" class="store-list">
-                <div class="store-item" draggable="true" data-store="xiaomi">
-                    <span class="drag-handle">&#x2630;</span>
-                    <span class="store-name">小米应用商店</span>
+                <div class="platform-filter-row">
+                    <label class="radio-label"><input type="radio" name="platformFilter" value="all" checked> 全部</label>
+                    <label class="radio-label"><input type="radio" name="platformFilter" value="ios"> 仅iOS</label>
+                    <label class="radio-label"><input type="radio" name="platformFilter" value="android"> 仅安卓</label>
                 </div>
-                <div class="store-item" draggable="true" data-store="tencent">
-                    <span class="drag-handle">&#x2630;</span>
-                    <span class="store-name">腾讯应用宝</span>
-                </div>
-                <div class="store-item" draggable="true" data-store="wandoujia">
-                    <span class="drag-handle">&#x2630;</span>
-                    <span class="store-name">豌豆荚</span>
-                </div>
-                <div class="store-item" draggable="true" data-store="appchina">
-                    <span class="drag-handle">&#x2630;</span>
-                    <span class="store-name">应用汇</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- 扩展查询选项 -->
-        <div class="settings-section extra-options-section">
-            <div class="settings-header">
-                <h3>扩展查询（仅安卓）</h3>
-                <span class="settings-hint">勾选后查询时间会增加，按需开启</span>
-            </div>
-            <div class="extra-options-row">
-                <label class="checkbox-label extra-opt-label">
-                    <input type="checkbox" id="getApkUrl">
-                    <span>获取APK直链</span>
-                </label>
-                <div id="apkUrlModeRow" class="apk-mode-row" style="display:none;">
-                    <label class="radio-label"><input type="radio" name="apkUrlMode" value="single" checked> 单个（找到即停）</label>
-                    <label class="radio-label"><input type="radio" name="apkUrlMode" value="multiple"> 多个（获取全部）</label>
-                </div>
-                <label class="checkbox-label extra-opt-label">
-                    <input type="checkbox" id="getSha1">
-                    <span>获取SHA1</span>
-                </label>
             </div>
         </div>
 
@@ -153,6 +112,113 @@
 
     <!-- Toast 提示 -->
     <div id="toast" class="toast">已复制</div>
+
+    <!-- ========== 设置面板 ========== -->
+    <div class="settings-overlay" id="settingsOverlay" onclick="closeSettingsIfBg(event)">
+        <div class="settings-panel" id="settingsPanel">
+            <div class="settings-panel-header">
+                <h2>设置</h2>
+                <button class="settings-close-btn" onclick="closeSettings()">&#10005;</button>
+            </div>
+            <div class="settings-panel-body">
+
+                <!-- 安卓商店优先级 -->
+                <div class="settings-group">
+                    <div class="settings-group-title">安卓应用商店优先级</div>
+                    <div class="settings-group-hint">拖动调整顺序，排在前面的优先使用</div>
+                    <div id="storeList" class="store-list">
+                        <div class="store-item" draggable="true" data-store="xiaomi">
+                            <span class="drag-handle">&#x2630;</span>
+                            <span class="store-name">小米应用商店</span>
+                        </div>
+                        <div class="store-item" draggable="true" data-store="tencent">
+                            <span class="drag-handle">&#x2630;</span>
+                            <span class="store-name">腾讯应用宝</span>
+                        </div>
+                        <div class="store-item" draggable="true" data-store="wandoujia">
+                            <span class="drag-handle">&#x2630;</span>
+                            <span class="store-name">豌豆荚</span>
+                        </div>
+                        <div class="store-item" draggable="true" data-store="appchina">
+                            <span class="drag-handle">&#x2630;</span>
+                            <span class="store-name">应用汇</span>
+                        </div>
+                        <div class="store-item" draggable="true" data-store="pp">
+                            <span class="drag-handle">&#x2630;</span>
+                            <span class="store-name">PP助手</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 扩展查询 -->
+                <div class="settings-group">
+                    <div class="settings-group-title">扩展查询（仅安卓）</div>
+                    <div class="settings-group-hint">勾选后查询时间会增加，按需开启</div>
+                    <div class="extra-options-row">
+                        <label class="checkbox-label extra-opt-label">
+                            <input type="checkbox" id="getApkUrl">
+                            <span>获取APK直链</span>
+                        </label>
+                        <div id="apkUrlModeRow" class="apk-mode-row" style="display:none;">
+                            <label class="radio-label"><input type="radio" name="apkUrlMode" value="single" checked> 单个（找到即停）</label>
+                            <label class="radio-label"><input type="radio" name="apkUrlMode" value="multiple"> 多个（获取全部）</label>
+                        </div>
+                        <label class="checkbox-label extra-opt-label">
+                            <input type="checkbox" id="getSha1">
+                            <span>获取SHA1</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- 查询间隔 -->
+                <div class="settings-group">
+                    <div class="settings-group-title">查询间隔时间</div>
+                    <div class="settings-group-hint">每条查询之间的随机等待时间，建议大量查询时设置 2-5 秒以避免被平台封锁</div>
+                    <div class="interval-row">
+                        <span class="interval-label-left">不等待</span>
+                        <input type="range" id="queryIntervalSlider" min="0" max="10000" step="500" value="0" oninput="onIntervalSliderChange()">
+                        <span class="interval-label-right">10 秒</span>
+                        <span class="interval-value-badge" id="intervalValueBadge">关闭</span>
+                    </div>
+                </div>
+
+                <!-- 开机自启 -->
+                <div class="settings-group">
+                    <div class="settings-group-title">开机自动启动</div>
+                    <div class="settings-group-hint">启动系统后自动运行本工具（Mac 有效，Windows 版本暂不支持）</div>
+                    <div class="startup-row">
+                        <button class="btn btn-secondary" id="btnStartupAdd" onclick="setupStartup(true)">添加开机启动</button>
+                        <button class="btn btn-secondary" id="btnStartupRemove" onclick="setupStartup(false)">取消开机启动</button>
+                        <span class="startup-status" id="startupStatus"></span>
+                    </div>
+                </div>
+
+                <!-- 跨浏览器说明 -->
+                <div class="settings-group">
+                    <div class="settings-group-title">查询记录跨浏览器共享</div>
+                    <div class="settings-group-hint">查询记录存储在浏览器本地（localStorage），不同浏览器之间无法自动同步。如需在多台设备或不同浏览器之间共享结果，请使用「下载 XLSX」功能导出后传输。</div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="settings-group settings-actions">
+                    <button class="btn btn-secondary" onclick="resetSettings()">恢复默认设置</button>
+                    <button class="btn btn-danger" onclick="confirmShutdown()">关闭服务</button>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- 关闭服务确认弹窗 -->
+    <div class="confirm-overlay" id="shutdownOverlay" style="display:none;">
+        <div class="confirm-box">
+            <p>确定要关闭服务吗？<br><small style="color:#999;">关闭后需要重新启动程序才能使用。</small></p>
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="document.getElementById('shutdownOverlay').style.display='none'">取消</button>
+                <button class="btn btn-danger" onclick="doShutdown()">确认关闭</button>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/main.js"></script>
 </body>

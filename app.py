@@ -321,6 +321,118 @@ def search_wandoujia(package_name):
     return None
 
 
+def search_appchina_by_name(name, limit=3):
+    """应用汇 - 按名称搜索，返回包名列表"""
+    url = f"http://www.appchina.com/search/?keywords={urllib.parse.quote(name)}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        seen = set()
+        # 应用汇搜索结果页：每个app有个链接如 /app/com.xxx.xxx
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            m = re.search(r'/app/([a-zA-Z0-9._\-]+)', href)
+            if m:
+                pkg = m.group(1)
+                if is_package_name(pkg) and pkg not in seen:
+                    seen.add(pkg)
+                    results.append(pkg)
+                    if len(results) >= limit:
+                        break
+        return results
+    except Exception:
+        return []
+
+
+def search_xiaomi_by_name_full(name, limit=3):
+    """小米应用商店 - 按名称搜索，返回完整结果（含App信息）"""
+    pkg_list = search_xiaomi_by_name(name)
+    results = []
+    for pkg in pkg_list[:limit]:
+        r = search_xiaomi(pkg)
+        if r and is_name_relevant(name, r.get("app_name", "")):
+            r["package_name"] = pkg
+            r["platform"] = "Android"
+            results.append(r)
+    return results
+
+
+def search_tencent_by_name_full(name, limit=3):
+    """腾讯应用宝 - 按名称搜索，返回完整结果"""
+    pkg_list = search_tencent_by_name(name)
+    results = []
+    for pkg in pkg_list[:limit]:
+        r = search_tencent(pkg)
+        if r and is_name_relevant(name, r.get("app_name", "")):
+            r["package_name"] = pkg
+            r["platform"] = "Android"
+            results.append(r)
+    return results
+
+
+def search_appchina_by_name_full(name, limit=3):
+    """应用汇 - 按名称搜索，返回完整结果"""
+    pkg_list = search_appchina_by_name(name, limit)
+    results = []
+    for pkg in pkg_list:
+        r = search_appchina(pkg)
+        if r and is_name_relevant(name, r.get("app_name", "")):
+            r["package_name"] = pkg
+            r["platform"] = "Android"
+            results.append(r)
+    return results
+
+
+def search_pp(package_name):
+    """PP助手 - 按包名查询"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    # 尝试通过搜索找到对应应用
+    try:
+        search_url = f"https://www.pp.cn/soft/search.html?q={urllib.parse.quote(package_name)}"
+        resp = requests.get(search_url, headers=headers, timeout=HTTP_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # 在搜索结果中找包含包名的应用链接
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            if package_name in href or package_name in resp.text:
+                break
+        # 尝试从页面文本中提取包名匹配的应用
+        if package_name not in resp.text:
+            return None
+        # 提取App名称（页面标题或第一个结果标题）
+        title_tag = soup.find("title")
+        app_name_tag = soup.find("h2") or soup.find("h3") or soup.find("strong")
+        app_name = app_name_tag.get_text(strip=True) if app_name_tag else ""
+        app_name = clean_app_name(app_name) if app_name else ""
+        if not app_name:
+            return None
+        # 找应用详情链接
+        detail_url = ""
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            if re.search(r'/soft/\d+/', href) or re.search(r'/app/\d+', href):
+                detail_url = href if href.startswith("http") else "https://www.pp.cn" + href
+                break
+        if not detail_url:
+            detail_url = search_url
+        return {
+            "source": "PP助手",
+            "app_name": app_name,
+            "download_url": detail_url,
+            "icon_url": "",
+            "category": "",
+        }
+    except Exception:
+        pass
+    return None
+
+
 def search_appchina(package_name):
     """应用汇 - 按包名查询"""
     url = f"http://www.appchina.com/app/{package_name}"
@@ -532,18 +644,34 @@ def _has_android_match(ios_name, android_results):
 
 def query_by_name(name, android_store_order=None, exact_search=False):
     """按App名称搜索，iOS + Android 互补：
-    1. 并发：Apple API（iOS）+ 豌豆荚（Android）
-    2. 对没有安卓对应的 iOS app，补搜豌豆荚
+    1. 并发：Apple API（iOS）+ Android 各商店（多商店回退）
+    2. 对没有安卓对应的 iOS app，补搜安卓商店
     3. 对安卓结果，用优先商店丰富下载链接/分类/图标
     exact_search=True 时只返回与搜索词完全一致的 App
     """
     if android_store_order is None:
         android_store_order = DEFAULT_ANDROID_STORES
 
-    # === 第一轮：并发 iOS + Android 原始搜索 ===
+    # === 第一轮：并发 iOS + Android 多商店搜索 ===
+    # 按 android_store_order 的顺序依次尝试，直到找到结果为止
+    def _search_android_by_name(name, store_order):
+        """按商店优先级搜索，找到结果即停，返回结果列表"""
+        for store_id in store_order:
+            func = STORE_NAME_SEARCH_FUNCS.get(store_id)
+            if not func:
+                continue
+            try:
+                results = func(name)
+                if results:
+                    # wandoujia 返回的是包含完整字段的列表，其他返回的也是
+                    return results
+            except Exception:
+                continue
+        return []
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         future_ios = executor.submit(search_apple_by_name, name, 5)
-        future_android = executor.submit(search_wandoujia_by_name, name, 3)
+        future_android = executor.submit(_search_android_by_name, name, android_store_order)
         apple_results = future_ios.result()
         android_results_raw = future_android.result()
 
@@ -556,7 +684,7 @@ def query_by_name(name, android_store_order=None, exact_search=False):
         relevant_ios = apple_results[:1]
     relevant_ios = relevant_ios[:3]
 
-    # === 第二轮：为没有安卓对应的 iOS app 补搜豌豆荚 ===
+    # === 第二轮：为没有安卓对应的 iOS app 补搜安卓商店 ===
     ios_without_android = [
         r for r in relevant_ios
         if not _has_android_match(r["app_name"], android_results_raw)
@@ -565,7 +693,7 @@ def query_by_name(name, android_store_order=None, exact_search=False):
     if ios_without_android:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(ios_without_android))) as exe:
             futures = {
-                exe.submit(search_wandoujia_by_name, r["app_name"], 1): r
+                exe.submit(_search_android_by_name, r["app_name"], android_store_order): r
                 for r in ios_without_android[:2]
             }
             for f, ios_r in futures.items():
@@ -819,13 +947,14 @@ def search_apple_by_numid(app_id):
 
 
 # 默认安卓商店优先级
-DEFAULT_ANDROID_STORES = ["xiaomi", "tencent", "wandoujia", "appchina"]
+DEFAULT_ANDROID_STORES = ["xiaomi", "tencent", "wandoujia", "appchina", "pp"]
 
 STORE_SEARCH_FUNCS = {
     "xiaomi":    search_xiaomi,
     "tencent":   search_tencent,
     "wandoujia": search_wandoujia,
     "appchina":  search_appchina,
+    "pp":        search_pp,
 }
 
 STORE_NAMES = {
@@ -833,6 +962,15 @@ STORE_NAMES = {
     "tencent":   "腾讯应用宝",
     "wandoujia": "豌豆荚",
     "appchina":  "应用汇",
+    "pp":        "PP助手",
+}
+
+# 名称搜索函数：用于 query_by_name 的多商店回退
+STORE_NAME_SEARCH_FUNCS = {
+    "wandoujia": search_wandoujia_by_name,
+    "xiaomi":    lambda name: search_xiaomi_by_name_full(name, 3),
+    "tencent":   lambda name: search_tencent_by_name_full(name, 3),
+    "appchina":  lambda name: search_appchina_by_name_full(name, 3),
 }
 
 
@@ -960,6 +1098,95 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """关闭服务"""
+    import threading
+    def _stop():
+        time.sleep(0.5)
+        os._exit(0)
+    threading.Thread(target=_stop, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/startup/status", methods=["GET"])
+def api_startup_status():
+    """查询开机自启状态"""
+    enabled = _check_startup_enabled()
+    return jsonify({"enabled": enabled})
+
+
+@app.route("/api/startup", methods=["POST"])
+def api_startup():
+    """设置或取消开机自启"""
+    data = request.get_json()
+    enable = bool(data.get("enable", False))
+    ok, msg = _set_startup(enable)
+    enabled = _check_startup_enabled()
+    return jsonify({"ok": ok, "enabled": enabled, "message": msg})
+
+
+def _get_startup_plist_path():
+    home = os.path.expanduser("~")
+    return os.path.join(home, "Library", "LaunchAgents", "com.appfinder.launch.plist")
+
+
+def _check_startup_enabled():
+    if sys.platform == "darwin":
+        return os.path.exists(_get_startup_plist_path())
+    return False
+
+
+def _set_startup(enable):
+    if sys.platform != "darwin":
+        return False, "开机自启仅支持 Mac，Windows 版暂不支持"
+    plist_path = _get_startup_plist_path()
+    if enable:
+        # 找到当前可执行文件或 python 脚本
+        if getattr(sys, 'frozen', False):
+            program = sys.executable
+        else:
+            program = sys.executable
+            script = os.path.abspath(__file__)
+            plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.appfinder.launch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{program}</string>
+        <string>{script}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/appfinder.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/appfinder.err</string>
+</dict>
+</plist>"""
+        try:
+            os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+            with open(plist_path, "w") as f:
+                f.write(plist_content)
+            import subprocess
+            subprocess.run(["launchctl", "load", plist_path], capture_output=True)
+            return True, "已添加开机启动"
+        except Exception as e:
+            return False, f"添加失败: {e}"
+    else:
+        try:
+            if os.path.exists(plist_path):
+                import subprocess
+                subprocess.run(["launchctl", "unload", plist_path], capture_output=True)
+                os.remove(plist_path)
+            return True, "已取消开机启动"
+        except Exception as e:
+            return False, f"取消失败: {e}"
+
+
 @app.route("/api/query", methods=["POST"])
 def api_query():
     """查询接口：SSE 流式响应，实时推送进度"""
@@ -970,6 +1197,8 @@ def api_query():
     get_apk_url  = bool(req_data.get("get_apk_url", False))
     apk_url_mode = req_data.get("apk_url_mode", "single")   # "single" | "multiple"
     get_sha1     = bool(req_data.get("get_sha1", False))
+    platform_filter = req_data.get("platform_filter", "all")  # "all"|"ios"|"android"
+    query_interval_ms = max(0, int(req_data.get("query_interval_ms", 0)))
 
     # ── 输入解析（同步，generator 外完成）──────────────────────────
     MAX_ITEMS = 10000
@@ -1023,19 +1252,20 @@ def api_query():
     total_tasks = len(tasks)
 
     # ── 批量 / 并发参数 ──────────────────────────────────────────────
+    # 用户设置的查询间隔（随机范围 0.8x ~ 1.2x）
+    user_interval_s = query_interval_ms / 1000.0 if query_interval_ms > 0 else 0.0
+
     if total_tasks <= 500:
-        # 快速模式：全部并发，不加延迟
         BATCH_SIZE  = total_tasks or 1
         WORKERS     = min(50, max(10, total_tasks // 4))
-        BATCH_DELAY = 0.0
-        est_seconds = int(math.ceil(total_tasks / WORKERS) * 4)
+        BATCH_DELAY = user_interval_s  # 使用用户设置
+        est_seconds = int(math.ceil(total_tasks / WORKERS) * 4 + total_tasks * user_interval_s)
     else:
-        # 限速模式：每批 20 条，批间延迟 1s，模拟人工浏览节奏
         BATCH_SIZE  = 20
         WORKERS     = 10
-        BATCH_DELAY = 1.0
+        BATCH_DELAY = max(1.0, user_interval_s)  # 大量查询至少1s间隔
         batches     = math.ceil(total_tasks / BATCH_SIZE)
-        est_seconds = int(batches * (7 + BATCH_DELAY))   # ~8s/batch
+        est_seconds = int(batches * (7 + BATCH_DELAY))
 
     # ── SSE Generator ────────────────────────────────────────────────
     def generate():
@@ -1096,7 +1326,13 @@ def api_query():
                         rows = result or []
 
                     for r in rows:
-                        k = (r.get("package_name", ""), r.get("platform", ""))
+                        # 平台筛选
+                        plat = r.get("platform", "")
+                        if platform_filter == "ios" and plat != "iOS":
+                            continue
+                        if platform_filter == "android" and plat != "Android":
+                            continue
+                        k = (r.get("package_name", ""), plat)
                         if k not in seen_keys:
                             seen_keys.add(k)
                             all_results.append(r)
@@ -1104,9 +1340,11 @@ def api_query():
                     done_count += 1
                     yield f"data: {json.dumps({'type': 'progress', 'done': done_count, 'total': total_tasks})}\n\n"
 
-            # 批次间限速延迟
+            # 批次间限速延迟（加随机抖动 ±20%）
             if BATCH_DELAY > 0 and batch_start + BATCH_SIZE < len(tasks):
-                time.sleep(BATCH_DELAY)
+                import random
+                jitter = BATCH_DELAY * random.uniform(0.8, 1.2)
+                time.sleep(jitter)
 
         yield f"data: {json.dumps({'type': 'complete', 'results': all_results, **meta})}\n\n"
 
@@ -1266,12 +1504,13 @@ if __name__ == "__main__":
     import webbrowser
     import threading
 
-    # 固定端口
     port = 9527
 
     try:
         url = f"http://127.0.0.1:{port}"
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        # 仅当未被 launcher 启动时自己打开浏览器（避免重复打开）
+        if not os.environ.get("APPFINDER_NO_BROWSER"):
+            threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
         print(f"\n  App Query Tool Started!")
         print(f"  Open in browser: {url}")

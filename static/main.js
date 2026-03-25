@@ -1,17 +1,179 @@
+// ========== 设置 (Settings) ==========
+
+const SETTINGS_KEY = "app_finder_settings";
+
+const DEFAULT_SETTINGS = {
+    storeOrder: ["xiaomi", "tencent", "wandoujia", "appchina", "pp"],
+    exactSearch: false,
+    getApkUrl: false,
+    apkUrlMode: "single",
+    getSha1: false,
+    queryIntervalMs: 0,
+    platformFilter: "all",
+    keepInInput: false,
+};
+
+function loadSettings() {
+    try {
+        const s = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+        return Object.assign({}, DEFAULT_SETTINGS, s);
+    } catch { return { ...DEFAULT_SETTINGS }; }
+}
+
+function saveSettings() {
+    const s = {
+        storeOrder: androidStoreOrder,
+        exactSearch: document.getElementById("exactSearch")?.checked || false,
+        getApkUrl: document.getElementById("getApkUrl")?.checked || false,
+        apkUrlMode: document.querySelector('input[name="apkUrlMode"]:checked')?.value || "single",
+        getSha1: document.getElementById("getSha1")?.checked || false,
+        queryIntervalMs: parseInt(document.getElementById("queryIntervalSlider")?.value || 0),
+        platformFilter: document.querySelector('input[name="platformFilter"]:checked')?.value || "all",
+        keepInInput: document.getElementById("keepInInput")?.checked || false,
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+}
+
+function applySettings(s) {
+    // Exact search
+    const exactEl = document.getElementById("exactSearch");
+    if (exactEl) exactEl.checked = s.exactSearch;
+
+    // APK URL
+    const apkEl = document.getElementById("getApkUrl");
+    if (apkEl) {
+        apkEl.checked = s.getApkUrl;
+        const modeRow = document.getElementById("apkUrlModeRow");
+        if (modeRow) modeRow.style.display = s.getApkUrl ? "flex" : "none";
+    }
+
+    // APK URL mode
+    const modeEl = document.querySelector(`input[name="apkUrlMode"][value="${s.apkUrlMode}"]`);
+    if (modeEl) modeEl.checked = true;
+
+    // SHA1
+    const sha1El = document.getElementById("getSha1");
+    if (sha1El) sha1El.checked = s.getSha1;
+
+    // Interval slider
+    const slider = document.getElementById("queryIntervalSlider");
+    if (slider) {
+        slider.value = s.queryIntervalMs;
+        updateIntervalBadge(s.queryIntervalMs);
+    }
+
+    // Platform filter
+    const pfEl = document.querySelector(`input[name="platformFilter"][value="${s.platformFilter}"]`);
+    if (pfEl) pfEl.checked = true;
+
+    // Keep in input
+    const keepEl = document.getElementById("keepInInput");
+    if (keepEl) keepEl.checked = s.keepInInput;
+
+    // Store order
+    applyStoreOrder(s.storeOrder);
+}
+
+function applyStoreOrder(order) {
+    const list = document.getElementById("storeList");
+    if (!list) return;
+    const items = {};
+    list.querySelectorAll(".store-item").forEach(el => { items[el.dataset.store] = el; });
+    // Re-append in order
+    order.forEach(storeId => {
+        if (items[storeId]) list.appendChild(items[storeId]);
+    });
+    // Append any remaining items not in saved order
+    Object.keys(items).forEach(id => {
+        if (!order.includes(id)) list.appendChild(items[id]);
+    });
+    updateStoreOrder();
+}
+
+function resetSettings() {
+    localStorage.removeItem(SETTINGS_KEY);
+    applySettings(DEFAULT_SETTINGS);
+    updateStoreOrder();
+    showToast("已恢复默认设置");
+}
+
+// ========== 设置面板开关 ==========
+
+function openSettings() {
+    document.getElementById("settingsOverlay").classList.add("open");
+    // Refresh startup status
+    fetch("/api/startup/status").then(r => r.json()).then(d => {
+        document.getElementById("startupStatus").textContent = d.enabled ? "✓ 已开启" : "未开启";
+        document.getElementById("startupStatus").style.color = d.enabled ? "#52c41a" : "#999";
+    }).catch(() => {});
+}
+
+function closeSettings() {
+    document.getElementById("settingsOverlay").classList.remove("open");
+    saveSettings();
+}
+
+function closeSettingsIfBg(e) {
+    if (e.target === document.getElementById("settingsOverlay")) closeSettings();
+}
+
+// ========== 查询间隔 ==========
+
+function onIntervalSliderChange() {
+    const val = parseInt(document.getElementById("queryIntervalSlider").value);
+    updateIntervalBadge(val);
+}
+
+function updateIntervalBadge(ms) {
+    const badge = document.getElementById("intervalValueBadge");
+    if (!badge) return;
+    if (ms === 0) {
+        badge.textContent = "关闭";
+        badge.style.background = "#f0f0f0";
+        badge.style.color = "#999";
+    } else {
+        badge.textContent = ms >= 1000 ? `${ms / 1000} 秒` : `${ms} ms`;
+        badge.style.background = ms >= 2000 ? "#fff3e0" : "#e8f5e9";
+        badge.style.color = ms >= 2000 ? "#e67e22" : "#2e7d32";
+    }
+}
+
+// ========== 关闭服务 ==========
+
+function confirmShutdown() {
+    document.getElementById("shutdownOverlay").style.display = "flex";
+}
+
+function doShutdown() {
+    document.getElementById("shutdownOverlay").style.display = "none";
+    closeSettings();
+    fetch("/api/shutdown", { method: "POST" })
+        .then(() => {
+            document.body.innerHTML = `<div style="text-align:center;padding:80px 20px;font-family:sans-serif;color:#666;">
+                <p style="font-size:20px;margin-bottom:12px;">✓ 服务已关闭</p>
+                <p style="font-size:14px;">如需重新使用，请重新启动程序。</p>
+            </div>`;
+        })
+        .catch(() => showToast("关闭失败，请手动关闭窗口"));
+}
+
+// ========== 开机自启 ==========
+
+function setupStartup(enable) {
+    fetch("/api/startup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enable }),
+    }).then(r => r.json()).then(d => {
+        document.getElementById("startupStatus").textContent = d.enabled ? "✓ 已开启" : "未开启";
+        document.getElementById("startupStatus").style.color = d.enabled ? "#52c41a" : "#999";
+        showToast(d.message || (enable ? "已添加开机启动" : "已取消开机启动"));
+    }).catch(() => showToast("操作失败"));
+}
+
 // ========== 安卓商店拖拽排序 ==========
 
-let androidStoreOrder = ["xiaomi", "tencent", "wandoujia", "appchina"];
-
-// APK直链 checkbox 联动：勾选时显示单个/多个 radio
-document.addEventListener("DOMContentLoaded", () => {
-    const cb = document.getElementById("getApkUrl");
-    const modeRow = document.getElementById("apkUrlModeRow");
-    if (cb && modeRow) {
-        cb.addEventListener("change", () => {
-            modeRow.style.display = cb.checked ? "flex" : "none";
-        });
-    }
-});
+let androidStoreOrder = [...DEFAULT_SETTINGS.storeOrder];
 
 function initDragSort() {
     const list = document.getElementById("storeList");
@@ -91,7 +253,7 @@ function saveToHistory(packageNames, results) {
         appNames: appNames.slice(0, 5),
         isBatch,
         time: Date.now(),
-        results: results.slice(0, 500), // 最多缓存500条结果，防止 localStorage 溢出
+        results: results.slice(0, 500),
     };
     history = history.filter(h => JSON.stringify(h.packages) !== JSON.stringify(packageNames));
     history.unshift(entry);
@@ -99,7 +261,6 @@ function saveToHistory(packageNames, results) {
     try {
         localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     } catch (e) {
-        // 存储空间不足时去掉结果数据后重试
         const lightHistory = history.map(h => ({ ...h, results: [] }));
         try { localStorage.setItem(HISTORY_KEY, JSON.stringify(lightHistory)); } catch (_) {}
     }
@@ -122,7 +283,6 @@ function renderHistory() {
         const item = document.createElement("div");
         item.className = "history-item";
 
-        // 左侧主体：点击重新搜索
         const mainPart = document.createElement("div");
         mainPart.className = "history-main";
         mainPart.title = "点击重新搜索";
@@ -130,7 +290,6 @@ function renderHistory() {
         const label = document.createElement("span");
         label.className = "label";
         label.textContent = entry.label;
-
         mainPart.appendChild(label);
 
         if (entry.appNames && entry.appNames.length > 0) {
@@ -142,7 +301,6 @@ function renderHistory() {
         mainPart.addEventListener("click", () => onHistoryClick(entry));
         item.appendChild(mainPart);
 
-        // 右侧"呈现结果"按钮：直接显示缓存，不重新搜索
         if (entry.results && entry.results.length > 0) {
             const resultBtn = document.createElement("button");
             resultBtn.className = "history-result-btn";
@@ -176,7 +334,6 @@ function showCachedResults(entry) {
     }
     currentResults = entry.results;
     renderResults(entry.results);
-    // 如果勾选了"保留在搜索框"，将历史输入填回
     const keepInInput = document.getElementById("keepInInput")?.checked || false;
     if (keepInInput) {
         document.getElementById("packageInput").value = entry.packages.join("\n");
@@ -204,14 +361,18 @@ function showConfirm(message, onConfirm) {
 
 // ========== 风险确认弹窗（>100条）==========
 
-function showRiskWarning(itemCount, onConfirm) {
+function showRiskWarning(itemCount, intervalMs, onConfirm) {
     const overlay = document.createElement("div");
     overlay.className = "confirm-overlay";
+    const intervalHint = intervalMs > 0
+        ? `<p style="color:#52c41a;font-size:13px;">✓ 已设置查询间隔 ${intervalMs >= 1000 ? intervalMs/1000 + ' 秒' : intervalMs + ' ms'}，可有效降低封锁风险。</p>`
+        : `<p class="risk-hint">建议在 <strong>设置</strong> 中开启查询间隔（2-5秒），可大幅降低被封锁的风险。</p>`;
     overlay.innerHTML = `
         <div class="confirm-box risk-box">
             <h3>⚠️ 大量查询风险提示</h3>
             <p>您即将查询 <span class="risk-count-badge">${itemCount} 条</span> 数据。</p>
             <p>大量并发请求可能导致您的 IP 被小米、腾讯等应用商店封锁，影响后续使用。</p>
+            ${intervalHint}
             <p class="risk-hint">如确认继续，请在下方输入 <code>i know the risk</code>：</p>
             <input type="text" id="riskInput" class="risk-input" placeholder="i know the risk" autocomplete="off" spellcheck="false">
             <div class="btn-row">
@@ -248,9 +409,7 @@ async function requestNotificationPermission() {
 
 function sendNotification(resultCount) {
     if (!("Notification" in window) || Notification.permission !== "granted") return;
-    new Notification("App 查询完成 ✅", {
-        body: `共查到 ${resultCount} 条结果`,
-    });
+    new Notification("App 查询完成 ✅", { body: `共查到 ${resultCount} 条结果` });
 }
 
 // ========== 进度条 ==========
@@ -304,10 +463,11 @@ function doQuery() {
     const packageNames = input.split("\n").map(s => s.trim()).filter(s => s.length > 0);
     if (packageNames.length === 0) { showToast("请输入包名或App名称"); return; }
 
+    const intervalMs = parseInt(document.getElementById("queryIntervalSlider")?.value || 0);
+
     if (packageNames.length > 100) {
-        // 先请求通知权限，再弹风险提示
         requestNotificationPermission();
-        showRiskWarning(packageNames.length, () => startQuery(packageNames));
+        showRiskWarning(packageNames.length, intervalMs, () => startQuery(packageNames));
     } else {
         startQuery(packageNames);
     }
@@ -338,6 +498,9 @@ async function executeQuery(packageNames) {
     else if (n > 100)  loadingTxt.textContent = `共 ${n} 条，查询中请稍候...`;
     else               loadingTxt.textContent = "正在查询中，请稍候...";
 
+    const intervalMs = parseInt(document.getElementById("queryIntervalSlider")?.value || 0);
+    const platformFilter = document.querySelector('input[name="platformFilter"]:checked')?.value || "all";
+
     try {
         const response = await fetch("/api/query", {
             method: "POST",
@@ -349,6 +512,8 @@ async function executeQuery(packageNames) {
                 get_apk_url:  document.getElementById("getApkUrl")?.checked || false,
                 apk_url_mode: document.querySelector('input[name="apkUrlMode"]:checked')?.value || "single",
                 get_sha1:     document.getElementById("getSha1")?.checked || false,
+                query_interval_ms: intervalMs,
+                platform_filter: platformFilter,
             }),
         });
 
@@ -366,13 +531,13 @@ async function executeQuery(packageNames) {
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
-            buffer = lines.pop(); // 保留未完整行
+            buffer = lines.pop();
             for (const line of lines) {
                 if (line.startsWith("data: ")) {
                     try {
                         const data = JSON.parse(line.slice(6));
                         handleSSEEvent(data, packageNames);
-                    } catch (_) { /* ignore parse error */ }
+                    } catch (_) {}
                 }
             }
         }
@@ -388,17 +553,14 @@ async function executeQuery(packageNames) {
 function handleSSEEvent(data, packageNames) {
     if (data.type === "start") {
         showProgressBar(data.total, data.estimated_seconds);
-
     } else if (data.type === "progress") {
         updateProgressBar(data.done, data.total);
-
     } else if (data.type === "complete") {
         currentResults = data.results;
         renderResults(data.results);
         showQueryInfo(data);
         saveToHistory(packageNames, data.results);
         sendNotification(data.results.length);
-
     } else if (data.type === "error") {
         showToast(data.message || "查询出错");
     }
@@ -413,7 +575,7 @@ function showQueryInfo(data) {
     if (data.invalid_count > 0) {
         msgs.push(`${data.invalid_count} 条格式无效（纯符号等）已自动跳过`);
     }
-if (data.deduplicated > 0) {
+    if (data.deduplicated > 0) {
         msgs.push(`去除了 ${data.deduplicated} 个重复项`);
     }
     if (msgs.length > 0) {
@@ -443,6 +605,13 @@ function renderResults(results) {
     section.style.display = "block";
     count.textContent = results.length;
     body.innerHTML = "";
+
+    const hasApk  = results.some(r => r.apk_direct_urls && r.apk_direct_urls.length > 0);
+    const hasSha1 = results.some(r => r.sha1);
+
+    // Show/hide column headers
+    document.getElementById("thApkUrl").style.display = hasApk  ? "" : "none";
+    document.getElementById("thSha1").style.display   = hasSha1 ? "" : "none";
 
     let lastPkg = null;
     results.forEach(r => {
@@ -502,7 +671,7 @@ function renderResults(results) {
             tdCategory.appendChild(catSpan);
         }
 
-        // 下载地址
+        // 商店地址
         const tdUrl = document.createElement("td");
         const urlCell = document.createElement("div");
         urlCell.className = "url-cell";
@@ -521,9 +690,12 @@ function renderResults(results) {
         urlCell.appendChild(copyBtn);
         tdUrl.appendChild(urlCell);
 
-        // APK直链（仅存在时显示）
+        // APK直链（仅显示当列存在时）
         const tdApk = document.createElement("td");
-        if (r.apk_direct_urls && r.apk_direct_urls.length > 0) {
+        tdApk.className = "td-apk-url";
+        if (!hasApk) {
+            tdApk.style.display = "none";
+        } else if (r.apk_direct_urls && r.apk_direct_urls.length > 0) {
             r.apk_direct_urls.forEach((url, i) => {
                 const div = document.createElement("div");
                 div.className = "url-cell";
@@ -539,9 +711,12 @@ function renderResults(results) {
             });
         }
 
-        // SHA1
+        // SHA1（仅显示当列存在时）
         const tdSha1 = document.createElement("td");
-        if (r.sha1) {
+        tdSha1.className = "td-sha1";
+        if (!hasSha1) {
+            tdSha1.style.display = "none";
+        } else if (r.sha1) {
             tdSha1.textContent = r.sha1;
             tdSha1.style.cursor = "pointer";
             tdSha1.style.fontFamily = "monospace";
@@ -552,12 +727,6 @@ function renderResults(results) {
         tr.append(tdIcon, tdName, tdPkg, tdPlatform, tdCategory, tdUrl, tdApk, tdSha1);
         body.appendChild(tr);
     });
-
-    // 显示/隐藏列头
-    const hasApk  = results.some(r => r.apk_direct_urls && r.apk_direct_urls.length > 0);
-    const hasSha1 = results.some(r => r.sha1);
-    document.getElementById("thApkUrl").style.display = hasApk  ? "" : "none";
-    document.getElementById("thSha1").style.display   = hasSha1 ? "" : "none";
 
     requestAnimationFrame(updateToolbarHeight);
     section.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -655,10 +824,38 @@ function clearInput() {
     document.getElementById("packageInput").focus();
 }
 
+// ========== APK URL checkbox 联动 ==========
+
+document.addEventListener("DOMContentLoaded", () => {
+    const cb = document.getElementById("getApkUrl");
+    const modeRow = document.getElementById("apkUrlModeRow");
+    if (cb && modeRow) {
+        cb.addEventListener("change", () => {
+            modeRow.style.display = cb.checked ? "flex" : "none";
+            saveSettings();
+        });
+    }
+
+    // Save settings on any change
+    ["exactSearch", "getSha1"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener("change", saveSettings);
+    });
+    document.querySelectorAll('input[name="apkUrlMode"], input[name="platformFilter"]').forEach(el => {
+        el.addEventListener("change", saveSettings);
+    });
+    document.getElementById("keepInInput")?.addEventListener("change", saveSettings);
+    document.getElementById("queryIntervalSlider")?.addEventListener("change", saveSettings);
+});
+
 // ========== 初始化 ==========
 
 renderHistory();
 initDragSort();
+
+// 从 localStorage 恢复设置
+const savedSettings = loadSettings();
+applySettings(savedSettings);
 
 document.getElementById("packageInput").addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") doQuery();
