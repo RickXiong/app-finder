@@ -9,42 +9,126 @@
 <body>
     <div class="container">
 
-        <!-- 输入区域 -->
-        <div class="input-section">
-            <div class="input-top-bar">
-                <span class="input-title">App 信息查询</span>
-                <button class="btn-settings" onclick="openSettings()" title="设置">&#9881;</button>
+        <!-- 双栏主区域：左=历史，右=搜索 -->
+        <div class="two-col-layout">
+
+            <!-- 左栏：历史记录 -->
+            <div class="hist-col" id="histCol">
+                <div class="hist-col-header">
+                    <span class="hist-col-title">最近查询</span>
+                    <div class="hist-actions">
+                        <button id="btnHistoryShare" class="btn-text hist-share-toggle"
+                                onclick="toggleHistoryShare()" title="切换历史共享模式">
+                            <svg width="12" height="12" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <!-- local 图标：锁 / shared 图标：两个圆圈相连。CSS 切换显示 -->
+                                <path class="icon-local" d="M4 7 V5 a4 4 0 0 1 8 0 v2 M3 7 h10 v6 H3 z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                                <g class="icon-shared" style="display:none;">
+                                    <circle cx="5" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                                    <circle cx="11" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                                    <path d="M7.5 8 h1" stroke="currentColor" stroke-width="1.5"/>
+                                </g>
+                            </svg>
+                            <span class="hist-share-label">本地</span>
+                        </button>
+                        <button class="btn-text" onclick="clearHistory()">清空</button>
+                    </div>
+                </div>
+                <div id="historyList" class="history-list"></div>
             </div>
-            <textarea id="packageInput" placeholder="输入包名或App名称，每行一个。例如：&#10;com.tencent.mm&#10;微信&#10;com.ss.android.ugc.aweme&#10;抖音" rows="5"></textarea>
-            <div class="btn-row">
-                <button id="btnQuery" class="btn btn-primary" onclick="doQuery()">查询 <span class="shortcut-hint">(Ctrl+Enter)</span></button>
-                <button class="btn btn-secondary" onclick="clearInput()">清空</button>
-                <label class="exact-search-label">
-                    <input type="checkbox" id="exactSearch">
-                    <span>精确搜索</span>
-                    <span class="settings-hint">（勾选后名称搜索只返回完全一致的App）</span>
-                </label>
-                <div class="platform-filter-row">
+
+            <!-- 拖拽分隔条 -->
+            <div class="col-resizer" id="colResizer"></div>
+
+            <!-- 右栏：搜索输入 -->
+            <div class="search-col">
+                <div class="textarea-wrap">
+                    <textarea id="packageInput" placeholder="输入包名或App名称，每行一个。例如：&#10;com.tencent.mm&#10;微信&#10;com.ss.android.ugc.aweme&#10;抖音" rows="5"></textarea>
+                    <button type="button" class="paste-from-clipboard" onclick="pasteFromClipboard()" title="从剪贴板粘贴到查询框">
+                        <svg width="14" height="14" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <rect x="4" y="3" width="10" height="13" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                            <rect x="6.5" y="1.5" width="5" height="3" rx="0.8" fill="currentColor"/>
+                        </svg>
+                        粘贴
+                    </button>
+                </div>
+
+                <!-- 行1：查询操作 + 精确/保留 + 平台 + 设置 -->
+                <div class="btn-row">
+                    <button id="btnQuery" class="btn btn-primary" onclick="doQuery()">查询 <span class="shortcut-hint">(Ctrl+Enter)</span></button>
+                    <button class="btn btn-secondary" onclick="clearInput()">清空</button>
+                    <span class="row-vdiv"></span>
+                    <label class="option-toggle">
+                        <input type="checkbox" id="keepInInput">
+                        <span class="option-toggle-label">保留输入</span>
+                    </label>
+                    <label class="option-toggle">
+                        <input type="checkbox" id="exactSearch">
+                        <span class="option-toggle-label">精确搜索</span>
+                        <span class="option-hint">（名称搜索只返回完全匹配）</span>
+                    </label>
+                    <span class="row-vdiv"></span>
+                    <span class="filter-label">平台：</span>
                     <label class="radio-label"><input type="radio" name="platformFilter" value="all" checked> 全部</label>
                     <label class="radio-label"><input type="radio" name="platformFilter" value="ios"> 仅iOS</label>
                     <label class="radio-label"><input type="radio" name="platformFilter" value="android"> 仅安卓</label>
+                    <div class="preset-inputgroup preset-group-right" title="常用设置：选择配置或点“+”保存当前设置">
+                        <select id="presetSelect" class="preset-select" onchange="applyPreset(this.value)"></select>
+                        <button class="preset-add" onclick="openSavePreset()" title="保存当前设置为新配置">
+                            <svg width="14" height="14" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <defs>
+                                    <linearGradient id="gradSave" x1="0%" y1="0%" x2="100%" y2="100%">
+                                        <stop offset="0%" stop-color="#6A4FE5"/>
+                                        <stop offset="100%" stop-color="#3FC8DF"/>
+                                    </linearGradient>
+                                </defs>
+                                <path d="M9 3 v12 M3 9 h12" stroke="url(#gradSave)" stroke-width="2.5" stroke-linecap="round"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button class="btn-settings admin-only" onclick="openLanShare()" title="手机 / 其他设备访问">&#128241;</button>
+                        <button class="btn-settings" onclick="openSettings()" title="设置">&#9881;</button>
+                    </div>
                 </div>
-            </div>
+
+                <!-- 行2：扩展选项（APK / SHA） -->
+                <div class="extend-options-row">
+                    <span class="filter-label">扩展（安卓）：</span>
+                    <label class="option-toggle">
+                        <input type="checkbox" id="getApkUrl">
+                        <span class="option-toggle-label">APK直链</span>
+                    </label>
+                    <div id="apkUrlModeRow" class="apk-mode-row" style="display:none;">
+                        <label class="radio-label"><input type="radio" name="apkUrlMode" value="single" checked> 单个</label>
+                        <label class="radio-label"><input type="radio" name="apkUrlMode" value="multiple"> 多个</label>
+                    </div>
+                    <label class="option-toggle">
+                        <input type="checkbox" id="getSha1">
+                        <span class="option-toggle-label">SHA1</span>
+                    </label>
+                    <label class="option-toggle">
+                        <input type="checkbox" id="getSha256">
+                        <span class="option-toggle-label">SHA256</span>
+                    </label>
+                    <span class="extend-hint">勾选后查询时间会增加</span>
+                </div>
+            </div><!-- /search-col -->
+        </div><!-- /two-col-layout -->
+
+        <!-- 后台查询横幅 -->
+        <div id="bgJobBanner" class="bg-job-banner" style="display:none;">
+            <span class="bg-job-icon">⏳</span>
+            <span class="bg-job-text">正在查询中，<strong>关闭此页面不影响查询</strong>，完成后重新打开页面即可看到结果。</span>
+            <button class="btn btn-small btn-secondary" style="margin-left:12px;flex-shrink:0;" onclick="cancelQuery()">取消查询</button>
         </div>
 
-        <!-- 历史记录 -->
-        <div class="history-section" id="historySection" style="display:none;">
-            <div class="history-header">
-                <div class="history-header-left">
-                    <h3>最近查询记录</h3>
-                    <label class="history-keep-label">
-                        <input type="checkbox" id="keepInInput">
-                        <span>保留在搜索框</span>
-                    </label>
-                </div>
-                <button class="btn-text" onclick="clearHistory()">清空历史</button>
-            </div>
-            <div id="historyList" class="history-list"></div>
+        <!-- 性能警告横幅 -->
+        <div id="perfWarning" class="perf-warning" style="display:none;">
+            <span class="perf-warning-icon">⚠️</span>
+            <span class="perf-warning-text" id="perfWarningText"></span>
+            <button class="btn btn-small btn-primary" id="perfApplyBtn" onclick="applyRecommendedConfig()">应用推荐配置</button>
+            <button class="btn btn-small btn-secondary" onclick="dismissPerfWarningForever()">不再提醒</button>
+            <button class="btn-text perf-dismiss" onclick="dismissPerfWarning()">×</button>
         </div>
 
         <!-- 加载状态 -->
@@ -52,6 +136,7 @@
             <div class="loading-top">
                 <div class="spinner"></div>
                 <span id="loadingText">正在查询中，请稍候...</span>
+                <button class="btn btn-small btn-secondary" style="margin-left:16px;" onclick="cancelQuery()">取消查询</button>
             </div>
             <div id="progressContainer" class="progress-container" style="display:none;">
                 <div class="progress-bar-track">
@@ -59,8 +144,11 @@
                 </div>
                 <div class="progress-stats">
                     <span id="progressText">0 / 0</span>
-                    <span id="progressEta"></span>
                 </div>
+            </div>
+            <div id="tipContainer" class="tip-container" style="display:none;">
+                <span class="tip-icon">💡</span>
+                <span id="tipText" class="tip-text"></span>
             </div>
         </div>
 
@@ -70,17 +158,36 @@
             <div class="result-toolbar sticky-toolbar" id="resultToolbar">
                 <div class="toolbar-left">
                     <h3>查询结果 (<span id="resultCount">0</span> 条)</h3>
+                    <span id="toolbarTip" class="toolbar-tip" onclick="nextToolbarTip()" title="点击换一条"></span>
+                </div>
+                <!-- 内联进度条（搜索中显示在工具栏右侧） -->
+                <div id="inlineProgress" class="inline-progress" style="display:none;">
+                    <div class="inline-progress-bar">
+                        <div class="inline-progress-fill" id="inlineProgressFill"></div>
+                    </div>
+                    <span class="inline-progress-text" id="inlineProgressText">0/0</span>
+                    <span class="retry-indicator" id="retryIndicator" style="display:none;" title="对首轮不完整的包以翻倍超时重试">补齐 <span id="retryIndicatorText">0/0</span></span>
+                    <button class="btn btn-small btn-secondary" onclick="cancelQuery()">取消</button>
                 </div>
                 <div class="toolbar-right">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="includeIcon"> 下载含图标链接
-                    </label>
-                    <label class="checkbox-label" title="将图标图片嵌入 XLSX（仅 XLSX 支持）">
-                        <input type="checkbox" id="includeIconImage"> 下载含图标图片
-                    </label>
-                    <button class="btn btn-small" onclick="copyAllResults()">复制全部</button>
-                    <button class="btn btn-small btn-primary" onclick="downloadResults('xlsx')">下载 XLSX</button>
-                    <button class="btn btn-small" onclick="downloadResults('csv')">下载 CSV</button>
+                    <!-- 前组：操作按钮（重查 / 复制 / 仅下载图标） -->
+                    <div class="toolbar-group toolbar-group-ops">
+                        <button class="btn btn-small btn-retry" id="btnRetryAll" style="display:none;" onclick="retryAllIncomplete()">重查不完整</button>
+                        <button class="btn btn-small" onclick="copyAllResults()">复制全部</button>
+                        <button class="btn btn-small" onclick="downloadAllIcons()" title="≤5 个直接下载，>5 个打包 zip">下载图标</button>
+                    </div>
+                    <span class="toolbar-divider" aria-hidden="true"></span>
+                    <!-- 后组：下载表（含图标选项 + XLSX/CSV） -->
+                    <div class="toolbar-group toolbar-group-dl">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="includeIcon"> 含图标链接
+                        </label>
+                        <label class="checkbox-label" title="将图标图片嵌入 XLSX（仅 XLSX 支持）">
+                            <input type="checkbox" id="includeIconImage"> 含图标
+                        </label>
+                        <button class="btn btn-small btn-primary" onclick="downloadResults('xlsx')">下载 XLSX</button>
+                        <button class="btn btn-small" onclick="downloadResults('csv')">下载 CSV</button>
+                    </div>
                 </div>
             </div>
 
@@ -92,13 +199,15 @@
                     <thead>
                         <tr>
                             <th class="col-icon"></th>
-                            <th>App名称</th>
+                            <th id="thName" class="th-sortable" data-col="name">App名称</th>
                             <th>包名</th>
-                            <th>平台</th>
-                            <th>分类</th>
+                            <th id="thPlatform" class="th-sortable th-filterable" data-col="platform">平台</th>
+                            <th id="thCategory" class="th-sortable" data-col="category">分类</th>
                             <th>商店地址</th>
                             <th class="col-apk-url" id="thApkUrl" style="display:none;">下载地址</th>
                             <th class="col-sha1" id="thSha1" style="display:none;">SHA1</th>
+                            <th class="col-sha256" id="thSha256" style="display:none;">SHA256</th>
+                            <th class="col-action" id="thAction" style="display:none;"></th>
                         </tr>
                     </thead>
                     <tbody id="resultBody"></tbody>
@@ -122,52 +231,34 @@
             </div>
             <div class="settings-panel-body">
 
-                <!-- 安卓商店优先级 -->
+                <!-- 外观模式 -->
                 <div class="settings-group">
-                    <div class="settings-group-title">安卓应用商店优先级</div>
-                    <div class="settings-group-hint">拖动调整顺序，排在前面的优先使用</div>
-                    <div id="storeList" class="store-list">
-                        <div class="store-item" draggable="true" data-store="xiaomi">
-                            <span class="drag-handle">&#x2630;</span>
-                            <span class="store-name">小米应用商店</span>
-                        </div>
-                        <div class="store-item" draggable="true" data-store="tencent">
-                            <span class="drag-handle">&#x2630;</span>
-                            <span class="store-name">腾讯应用宝</span>
-                        </div>
-                        <div class="store-item" draggable="true" data-store="wandoujia">
-                            <span class="drag-handle">&#x2630;</span>
-                            <span class="store-name">豌豆荚</span>
-                        </div>
-                        <div class="store-item" draggable="true" data-store="appchina">
-                            <span class="drag-handle">&#x2630;</span>
-                            <span class="store-name">应用汇</span>
-                        </div>
-                        <div class="store-item" draggable="true" data-store="pp">
-                            <span class="drag-handle">&#x2630;</span>
-                            <span class="store-name">PP助手</span>
-                        </div>
+                    <div class="settings-group-title">外观模式</div>
+                    <div class="settings-group-hint">切换浅色/深色界面主题</div>
+                    <div class="color-mode-options" style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;">
+                        <label class="option-toggle">
+                            <input type="radio" name="colorMode" value="light" onchange="saveSettings()">
+                            <span class="option-toggle-label">浅色</span>
+                        </label>
+                        <label class="option-toggle">
+                            <input type="radio" name="colorMode" value="dark" onchange="saveSettings()">
+                            <span class="option-toggle-label">深色</span>
+                        </label>
+                        <label class="option-toggle">
+                            <input type="radio" name="colorMode" value="system" checked onchange="saveSettings()">
+                            <span class="option-toggle-label">跟随系统</span>
+                        </label>
                     </div>
                 </div>
 
-                <!-- 扩展查询 -->
+                <!-- 查询速度提醒 -->
                 <div class="settings-group">
-                    <div class="settings-group-title">扩展查询（仅安卓）</div>
-                    <div class="settings-group-hint">勾选后查询时间会增加，按需开启</div>
-                    <div class="extra-options-row">
-                        <label class="checkbox-label extra-opt-label">
-                            <input type="checkbox" id="getApkUrl">
-                            <span>获取APK直链</span>
-                        </label>
-                        <div id="apkUrlModeRow" class="apk-mode-row" style="display:none;">
-                            <label class="radio-label"><input type="radio" name="apkUrlMode" value="single" checked> 单个（找到即停）</label>
-                            <label class="radio-label"><input type="radio" name="apkUrlMode" value="multiple"> 多个（获取全部）</label>
-                        </div>
-                        <label class="checkbox-label extra-opt-label">
-                            <input type="checkbox" id="getSha1">
-                            <span>获取SHA1</span>
-                        </label>
-                    </div>
+                    <div class="settings-group-title">查询速度提醒</div>
+                    <div class="settings-group-hint">当近5次查询速度明显慢于历史均值时，显示优化建议提示</div>
+                    <label class="option-toggle" style="margin-top:6px;">
+                        <input type="checkbox" id="showPerfWarning" checked onchange="saveSettings()">
+                        <span class="option-toggle-label">启用速度提醒</span>
+                    </label>
                 </div>
 
                 <!-- 查询间隔 -->
@@ -182,10 +273,10 @@
                     </div>
                 </div>
 
-                <!-- 开机自启 -->
-                <div class="settings-group">
+                <!-- 开机自启（仅本机管理员可见）-->
+                <div class="settings-group admin-only">
                     <div class="settings-group-title">开机自动启动</div>
-                    <div class="settings-group-hint">启动系统后自动运行本工具（Mac 有效，Windows 版本暂不支持）</div>
+                    <div class="settings-group-hint">启动系统后自动运行本工具（Mac 和 Windows 均支持）</div>
                     <div class="startup-row">
                         <button class="btn btn-secondary" id="btnStartupAdd" onclick="setupStartup(true)">添加开机启动</button>
                         <button class="btn btn-secondary" id="btnStartupRemove" onclick="setupStartup(false)">取消开机启动</button>
@@ -193,16 +284,29 @@
                     </div>
                 </div>
 
-                <!-- 跨浏览器说明 -->
-                <div class="settings-group">
-                    <div class="settings-group-title">查询记录跨浏览器共享</div>
-                    <div class="settings-group-hint">查询记录存储在浏览器本地（localStorage），不同浏览器之间无法自动同步。如需在多台设备或不同浏览器之间共享结果，请使用「下载 XLSX」功能导出后传输。</div>
-                </div>
 
                 <!-- 操作按钮 -->
                 <div class="settings-group settings-actions">
                     <button class="btn btn-secondary" onclick="resetSettings()">恢复默认设置</button>
-                    <button class="btn btn-danger" onclick="confirmShutdown()">关闭服务</button>
+                    <!-- 关闭服务只对本机管理员显示 -->
+                    <button class="btn btn-danger admin-only" onclick="confirmShutdown()">关闭服务</button>
+                </div>
+
+                <!-- ========== 关于 ========== -->
+                <div class="settings-group about-group">
+                    <div class="settings-group-title">关于</div>
+                    <div class="about-content">
+                        <div class="about-text">
+                            <p>一个查 App 信息的小工具——输入包名或 App 名，<br>自动从小米 / 应用宝 / 豌豆荚等商店找到应用名、图标、分类和下载链接。</p>
+                            <p>用着顺手有想法 / bug / 新需求，欢迎加微信聊聊。</p>
+                            <p class="about-meta">非商用，纯粹交个朋友 ☕</p>
+                        </div>
+                        <div class="about-qr">
+                            <img id="aboutWechatQr" alt="WeChat" style="display:none;">
+                            <div class="about-qr-placeholder" id="aboutWechatQrPlaceholder">加载中…</div>
+                            <div class="about-qr-label">微信扫码 · <code class="wechat-id-copy" onclick="_copyWechatId(this)" title="点击复制微信号">rickaruike</code></div>
+                        </div>
+                    </div>
                 </div>
 
             </div>
@@ -210,7 +314,7 @@
     </div>
 
     <!-- 关闭服务确认弹窗 -->
-    <div class="confirm-overlay" id="shutdownOverlay" style="display:none;">
+    <div class="confirm-overlay" id="shutdownOverlay" style="display:none;z-index:1200;">
         <div class="confirm-box">
             <p>确定要关闭服务吗？<br><small style="color:#999;">关闭后需要重新启动程序才能使用。</small></p>
             <div class="btn-row">
@@ -220,6 +324,32 @@
         </div>
     </div>
 
+    <!-- 手机/其他设备访问 弹窗 -->
+    <div class="confirm-overlay" id="lanShareOverlay" style="display:none;" onclick="closeLanShareIfBg(event)">
+        <div class="confirm-box lan-share-box">
+            <div class="lan-share-header">
+                <span class="lan-share-title">📱 手机 / 其他设备访问</span>
+                <button class="lan-share-close" onclick="closeLanShare()" title="关闭">×</button>
+            </div>
+            <div id="lanShareBody" class="lan-share-body">
+                <div class="lan-share-loading">加载中…</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 保存常用设置 弹窗 -->
+    <div class="confirm-overlay" id="savePresetOverlay" style="display:none;" onclick="closeSavePresetIfBg(event)">
+        <div class="confirm-box">
+            <p style="font-weight:600;margin-bottom:10px;">保存当前设置为常用配置</p>
+            <input type="text" id="presetNameInput" class="preset-name-input" placeholder="输入配置名称（最多20字）" maxlength="20" style="width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:12px;">
+            <div class="btn-row" style="justify-content:flex-end;gap:8px;">
+                <button class="btn btn-secondary" onclick="closeSavePreset()">取消</button>
+                <button class="btn btn-primary" onclick="doSavePreset()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/tips.js"></script>
     <script src="/static/main.js"></script>
 </body>
 </html>

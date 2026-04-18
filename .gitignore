@@ -1,11 +1,36 @@
+# ── Python ──
 __pycache__/
 *.pyc
 *.pyo
-.DS_Store
-build/
-dist/
-*.spec
 *.egg-info/
 .venv/
 venv/
+
+# ── macOS / 编辑器 ──
+.DS_Store
 .claude/
+.vscode/
+.idea/
+
+# ── PyInstaller 打包输出（太大 + 每台机器独立构建）──
+build/
+build_x86/
+dist/
+dist_x86/
+*.spec
+# 例外：保留主 spec 文件
+!lookup_appinfo_mac.spec
+!lookup_appinfo.spec
+icon_src/app_icon.iconset/
+
+# ── 应用运行时产生的数据（本地数据，不该跨机器同步）──
+.history.json
+.jobs_cache.json
+.lan_settings.json
+launchd.log
+*.log
+
+# ── 敏感数据 ──
+qimai_cookies.json
+.env
+*.token
