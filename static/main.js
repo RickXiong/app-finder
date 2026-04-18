@@ -897,32 +897,6 @@ function showCachedResults(entry) {
     }
 }
 
-// ========== 确认弹窗 ==========
-
-function showConfirm(message, onConfirm) {
-    const overlay = document.createElement("div");
-    overlay.className = "confirm-overlay";
-    overlay.innerHTML = `
-        <div class="confirm-box">
-            <p>${message}</p>
-            <div class="btn-row">
-                <button class="btn btn-secondary" id="confirmCancel">取消</button>
-                <button class="btn btn-primary" id="confirmOk">确认查询</button>
-            </div>
-        </div>`;
-    document.body.appendChild(overlay);
-    overlay.querySelector("#confirmCancel").onclick = () => overlay.remove();
-    overlay.querySelector("#confirmOk").onclick = () => { overlay.remove(); onConfirm(); };
-    overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
-    overlay.addEventListener("keydown", e => {
-        if (e.key === "Enter") { e.preventDefault(); overlay.remove(); onConfirm(); }
-        if (e.key === "Escape") { e.preventDefault(); overlay.remove(); }
-    });
-    // 让 overlay 可以接收键盘事件
-    overlay.tabIndex = -1;
-    setTimeout(() => overlay.focus(), 50);
-}
-
 // ========== 批量查询确认弹窗（≥10条）==========
 // 默认在弹窗里提供"间隔时间"滑块，默认 1.5s，仅对本次批量查询生效。
 // itemCount > 100 时额外要求输入 "i know the risk"。
@@ -1087,29 +1061,11 @@ async function checkPendingJob() {
     }
 }
 
-// ========== 进度条 & 等待小贴士 ==========
+// ========== 等待小贴士 ==========
+// 注：老版本的大进度条 UI 已被工具栏内联进度条（_showInlineProgress）取代，
+// 原来的 showProgressBar / updateProgressBar / resetProgressBar 三个函数已移除。
 
 let _tipTimer = null;  // 小贴士轮播定时器
-
-function showProgressBar(total) {
-    const container = document.getElementById("progressContainer");
-    container.style.display = "block";
-    document.getElementById("progressFill").style.width = "0%";
-    document.getElementById("progressText").textContent = `0 / ${total}`;
-    startTipRotation();
-}
-
-function updateProgressBar(done, total) {
-    const pct = total > 0 ? (done / total * 100) : 0;
-    document.getElementById("progressFill").style.width = pct.toFixed(1) + "%";
-    document.getElementById("progressText").textContent = `${done} / ${total}  (${pct.toFixed(1)}%)`;
-}
-
-function resetProgressBar() {
-    const container = document.getElementById("progressContainer");
-    if (container) container.style.display = "none";
-    stopTipRotation();
-}
 
 function startTipRotation() {
     // 先清掉已有定时器，避免多次调用导致双倍速轮播
@@ -2489,31 +2445,6 @@ function copyCell(td, text) {
         const shown = text.length > 40 ? text.slice(0, 40) + "..." : text;
         showToast("已复制：" + shown);
     }).catch(() => showToast("复制失败，请手动选中复制"));
-}
-
-/** 带动作按钮的增强 Toast —— 桌面/手机都友好 */
-function showToastWithAction(msg, actionText, onAction) {
-    const toast = document.getElementById("toast");
-    toast.innerHTML = "";
-    const msgSpan = document.createElement("span");
-    msgSpan.textContent = msg;
-    toast.appendChild(msgSpan);
-    if (actionText) {
-        const btn = document.createElement("button");
-        btn.className = "toast-action";
-        btn.textContent = actionText;
-        btn.onclick = () => {
-            try { onAction(); } catch (_) {}
-            toast.classList.remove("show");
-        };
-        toast.appendChild(btn);
-    }
-    toast.classList.add("show", "with-action");
-    clearTimeout(toast._timer);
-    // 带动作的 toast 留长一点（4 秒）给用户点按钮
-    toast._timer = setTimeout(() => {
-        toast.classList.remove("show", "with-action");
-    }, 4000);
 }
 
 function copyAllResults() {

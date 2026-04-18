@@ -182,7 +182,10 @@ app = Flask(
     template_folder=resource_path('templates'),
     static_folder=resource_path('static'),
 )
-app.config['TEMPLATES_AUTO_RELOAD'] = True
+# 仅在开发模式（直接跑 python3 app.py）打开模板自动重载。
+# PyInstaller 打包后 sys.frozen=True，模板打死在 bundle 里不会变，
+# 关掉可以省 Flask 每次请求都检查模板 mtime 的开销。
+app.config['TEMPLATES_AUTO_RELOAD'] = not getattr(sys, 'frozen', False)
 
 
 @app.before_request
@@ -1078,77 +1081,8 @@ def search_apple_by_name(name, limit=3):
         return []
 
 
-def search_xiaomi_by_name(name):
-    """小米应用商店 - 按名称搜索，返回 [{package_name, app_name}, ...]。
-
-    统一契约：所有 *_by_name 函数返回 list[dict]，dict 至少含 package_name
-    （app_name 可能为空，消费方需兼容）。
-
-    2026 年小米网页侧已经做反爬：/search?keywords=... 会 302 到首页。
-    如果不检测，页面里的 /details?id=... 链接其实是首页推荐，和搜索词无关，
-    会把无关包名（如植物大战僵尸等）误当成候选，污染后面的匹配。
-    """
-    url = f"https://app.mi.com/search?keywords={urllib.parse.quote(name)}"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        resp = _HTTP.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-        if resp.status_code != 200:
-            return []
-        # 被重定向到首页（或任何不带 keywords= 的 URL）→ 直接放弃，
-        # 不把首页推荐的包名误当搜索结果。
-        final_url = resp.url or ""
-        if "keywords=" not in final_url or "/search" not in final_url:
-            return []
-        soup = BeautifulSoup(resp.text, _BS_PARSER)
-        results = []
-        seen = set()
-        for link in soup.find_all("a", href=True):
-            href = link.get("href", "")
-            match = re.search(r'details\?id=([a-zA-Z0-9._\-]+)', href)
-            if match:
-                pkg = match.group(1)
-                if pkg not in seen:
-                    seen.add(pkg)
-                    link_text = link.get_text(strip=True)
-                    results.append({"package_name": pkg, "app_name": link_text or ""})
-                    if len(results) >= 3:
-                        break
-        return results
-    except Exception:
-        return []
-
-
-def search_tencent_by_name(name):
-    """腾讯应用宝 - 按名称搜索，返回 [{package_name, app_name}, ...]。
-    扫描整页 appdetail 链接及其文本，优先返回名称匹配的包名。
-    应用宝页面体积大（约660KB），名称匹配的 app 可能出现在任何位置。
-    """
-    url = f"https://sj.qq.com/myapp/search.htm?kw={urllib.parse.quote(name)}"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        resp = _HTTP.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-        if resp.status_code != 200:
-            return []
-        text = resp.text
-        # 策略1：从 href="/appdetail/PKG">AppName</a> 中找名称匹配的包名
-        # 应用宝页面中 appdetail 链接后紧跟着 app 名称作为链接文本
-        pattern = r'appdetail/([a-zA-Z0-9._\-]+)"[^>]{0,100}>([^<]{1,40})</a>'
-        results = []
-        seen = set()
-        for pkg, link_text in re.findall(pattern, text):
-            if pkg in seen:
-                continue
-            link_text = link_text.strip()
-            if link_text and is_name_relevant(name, link_text):
-                seen.add(pkg)
-                results.append({"package_name": pkg, "app_name": link_text})
-                if len(results) >= 3:
-                    return results
-        # 不再无条件兜底：名称搜索没匹配时返回空，避免"光环助手"这类
-        # 完全无关的 app 混入（与 iOS apple_results[:1] 已去除的反模式一致）
-        return results
-    except Exception:
-        return []
+# 注：小米 / 腾讯应用宝的搜索页均为 SPA / 重定向到首页，没法做按名称搜索。
+# 之前的 search_xiaomi_by_name / search_tencent_by_name 实测无效已删除。
 
 
 def _wandoujia_headers():
@@ -1285,33 +1219,8 @@ def search_wandoujia(package_name):
     return None
 
 
-def search_appchina_by_name(name, limit=3):
-    """应用汇 - 按名称搜索，返回 [{package_name, app_name}, ...]。
-    统一契约：所有 *_by_name 函数返回 list[dict]。"""
-    url = f"http://www.appchina.com/search/?keywords={urllib.parse.quote(name)}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        resp = _HTTP.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, _BS_PARSER)
-        results = []
-        seen = set()
-        # 应用汇搜索结果页：每个app有个链接如 /app/com.xxx.xxx
-        for link in soup.find_all("a", href=True):
-            href = link.get("href", "")
-            m = re.search(r'/app/([a-zA-Z0-9._\-]+)', href)
-            if m:
-                pkg = m.group(1)
-                if is_package_name(pkg) and pkg not in seen:
-                    seen.add(pkg)
-                    link_text = link.get_text(strip=True)
-                    results.append({"package_name": pkg, "app_name": link_text or ""})
-                    if len(results) >= limit:
-                        break
-        return results
-    except Exception:
-        return []
+# 注：应用汇的 search_appchina_by_name 实测名称搜索相关性弱，已删除。
+# 按名称搜索目前只用豌豆荚 + 搜狗（见 STORE_NAME_SEARCH_FUNCS）。
 
 
 def search_sogou_by_name(name, limit=3):
@@ -2582,38 +2491,9 @@ def _search_360(package_name):
         return None, None
 
 
-def search_360_for_app_name(package_name):
-    """搜索引擎反查包名对应的应用名称和参考链接（兜底策略）。
-    搜索顺序：头条搜索（最稳定）→ 搜狗SSR → 360搜索（易封锁，最后备用）
-    返回：(app_name, ref_url) 元组，均可能为 None
-    """
-    with _search_engine_cache_lock:
-        cached = _search_engine_cache.get(package_name)
-    if cached is not None:
-        return cached
-
-    distinct_kws = _get_distinctive_pkg_keywords(package_name)
-    kw_query = " ".join(distinct_kws) if distinct_kws else package_name
-
-    # 第一步：头条搜索（Toutiao）——JSON内嵌数据，稳定，不封锁
-    app_name, ref_url = _search_toutiao_json(package_name, kw_query)
-
-    # 第二步：搜狗 SSR 搜索
-    if not app_name:
-        app_name, ref_url_sogou = _search_sogou_web(package_name)
-        if not ref_url:
-            ref_url = ref_url_sogou
-
-    # 第三步：360搜索（备用，易封锁）
-    if not app_name:
-        app_name, ref_url_360 = _search_360(package_name)
-        if not ref_url:
-            ref_url = ref_url_360
-
-    result = (app_name, ref_url)
-    with _search_engine_cache_lock:
-        _search_engine_cache[package_name] = result
-    return result
+# 注：search_360_for_app_name 曾是"三级搜索引擎串联调度"函数，
+# 现在 query_single 已经内联了同样的逻辑（头条 → 搜狗 → 360），
+# 不再需要这个单独封装，已删除。
 
 
 def _fetch_360_store_detail(app_id, headers=None):
