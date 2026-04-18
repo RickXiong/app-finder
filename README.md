@@ -26,7 +26,16 @@
 
 ### 方式 1：直接下载打包好的程序（推荐非开发者）
 
-Release 页面（如果有挂的话）：下载对应架构的压缩包 → 解压 → 双击启动。
+去 **[Releases 页](https://github.com/RickXiong/app-finder/releases/latest)** 下载对应平台的包：
+
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| 🍎 macOS (Apple Silicon) | `lookup_appinfo_mac_arm64.zip` | M1 / M2 / M3 / M4 |
+| 🍎 macOS (Intel) | `lookup_appinfo_mac_x86_64.zip` | 2020 年前的 Intel Mac |
+| 🪟 Windows | `lookup_appinfo_win.zip` | 源码包，首次运行自动装 Python 依赖 |
+
+**Mac**：解压 → 双击 `.app`。首次打不开双击包内的 `fix_quarantine.command` 即可。
+**Windows**：解压 → 双击 `Start.bat`，首次会自动装依赖。
 
 ### 方式 2：源码运行
 
