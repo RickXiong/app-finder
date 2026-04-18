@@ -3688,9 +3688,9 @@ def _set_startup(enable):
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/appfinder.log</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/appfinder.err</string>
+    <string>/dev/null</string>
 </dict>
 </plist>"""
         try:
