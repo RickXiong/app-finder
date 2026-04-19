@@ -3108,6 +3108,11 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/legacy")
+def index_legacy():
+    return render_template("index-legacy.html")
+
+
 @app.route("/api/retry", methods=["POST"])
 def api_retry():
     """重查不完整结果：超时加倍，并行所有方法"""
@@ -3238,11 +3243,15 @@ def api_icon():
     if content is None:
         return jsonify({"ok": False, "message": "fetch failed"}), 502
 
-    base = f"{app_name}-{platform}" if platform else app_name
-    filename = _safe_filename(base) + ext
     resp = Response(content, mimetype=ct or "application/octet-stream")
-    resp.headers["Content-Disposition"] = _content_disposition(filename)
     resp.headers["Content-Length"] = str(len(content))
+    # _inline=1：用于 <img> 内联显示（绕开远端防盗链），不走下载附件
+    if request.args.get("_inline") == "1":
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+    else:
+        base = f"{app_name}-{platform}" if platform else app_name
+        filename = _safe_filename(base) + ext
+        resp.headers["Content-Disposition"] = _content_disposition(filename)
     return resp
 
 
