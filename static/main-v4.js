@@ -1679,19 +1679,33 @@
     /* ---------- 取消 ---------- */
     $('#btnCancelJob').addEventListener('click', async () => {
         if (!currentJob) return;
+        const hasPartial = currentResults && currentResults.length > 0;
         try { await fetch(`/api/cancel_job/${currentJob.jobId}`, { method: 'POST' }); } catch {}
         closeStream();
         exitLoading();
         clearPending();
-        // 恢复输入（legacy：取消后把包名还回输入框）
-        if (currentJob && currentJob.lines && currentJob.lines.length) {
-            input.value = currentJob.lines.join('\n');
-            input.dispatchEvent(new Event('input'));
+        if (hasPartial) {
+            // 已经有部分结果：保留结果页，冻结当前行序，给用户看已拿到的
+            if (typeof pinDisplayOrder === 'function') pinDisplayOrder();
+            markIncomplete();
+            showResults();
+            // 保留已拿到的结果到历史（legacy 行为：完成才存；取消也值得留个痕）
+            if (currentJob.lines && currentJob.lines.length) {
+                saveToHistory(currentJob.lines, currentResults);
+            }
+            currentJob = null;
+            toast(`已取消，保留已查到的 ${currentResults.length} 条结果`);
+        } else {
+            // 完全没有结果：回到搜索界面，输入框还原用户刚输入的内容
+            if (currentJob && currentJob.lines && currentJob.lines.length) {
+                input.value = currentJob.lines.join('\n');
+                input.dispatchEvent(new Event('input'));
+            }
+            currentJob = null;
+            $('#v4Root').classList.remove('has-results');
+            $('#resultsZone').hidden = true;
+            toast('已取消查询');
         }
-        currentJob = null;
-        $('#v4Root').classList.remove('has-results');
-        $('#resultsZone').hidden = true;
-        toast('已取消查询');
     });
 
     /* ---------- Esc ---------- */

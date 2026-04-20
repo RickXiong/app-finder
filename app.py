@@ -551,7 +551,11 @@ def _parse_query_input(req_data):
     total_raw = len(all_valid)
     skipped_over_limit = max(0, total_raw - MAX_ITEMS)
 
-    for item in all_valid[:MAX_ITEMS]:
+    for item_raw in all_valid[:MAX_ITEMS]:
+        item = _pre_normalize_input(item_raw)
+        if not item:
+            invalid_count += 1
+            continue
         if _IOS_ID_RE.match(item):
             ios_id_list.append(item)
         else:
@@ -570,9 +574,32 @@ def _parse_query_input(req_data):
                 seen.add(x); out.append(x)
         return out
 
-    cleaned_pkgs    = dedup(pkg_list)
+    def dedup_ci(lst):
+        """不区分大小写去重，并统一小写返回。
+        安卓包名约定全小写（com.tencent.mm）；iTunes bundle id 查询也不分大小写。
+        用户从 Excel 粘贴常见 'COM.TENCENT.MM' 混写——
+        (1) 查询时 API 按小写匹配，避免查不到；
+        (2) 结果展示也落成 'com.tencent.mm' 符合惯例。"""
+        seen, out = set(), []
+        for x in lst:
+            k = x.lower()
+            if k not in seen:
+                seen.add(k); out.append(k)
+        return out
+
+    def dedup_name(lst):
+        """应用名去重：对 latin 部分不区分大小写，同时折叠连续空白。
+        例：'微信 '  '微信'  'WeChat'  'wechat' → 只留前两条代表。"""
+        seen, out = set(), []
+        for x in lst:
+            k = re.sub(r'\s+', ' ', x).strip().lower()
+            if k and k not in seen:
+                seen.add(k); out.append(x)
+        return out
+
+    cleaned_pkgs    = dedup_ci(pkg_list)
     cleaned_ios_ids = dedup(ios_id_list)
-    cleaned_names   = dedup(name_list)
+    cleaned_names   = dedup_name(name_list)
     total_valid     = len(cleaned_pkgs) + len(cleaned_ios_ids) + len(cleaned_names)
     deduplicated    = max(0, (total_raw - skipped_over_limit) - total_valid - invalid_count)
 
@@ -889,6 +916,44 @@ def clean_package_name(name):
     return name
 
 
+# ─── 用户常见复制粘贴场景的预清洗 ─────────────────────────────
+# 用户经常把 App Store/Play Store 的链接直接粘进来，或者手残带了斜杠、
+# 或者把 'id414478124' 直接当 iOS id 输入。这些都应在进入分流前先规整。
+_APPLE_URL_ID_RE   = re.compile(r'apps\.apple\.com/[^?\s#]*?/id(\d{6,12})', re.IGNORECASE)
+_GPLAY_URL_PKG_RE  = re.compile(r'play\.google\.com/store/apps/details\?(?:[^#\s]*&)?id=([a-zA-Z0-9._\-]+)', re.IGNORECASE)
+_ID_PREFIX_RE      = re.compile(r'^id(\d{6,12})$', re.IGNORECASE)
+
+
+def _pre_normalize_input(raw):
+    """对一条用户输入做 URL/斜杠 等常见变形的预清洗。
+    - 苹果 App Store 链接 → 提取 iOS 数字 ID
+    - Google Play 链接   → 提取 Android 包名
+    - 头尾多余的 '/' '\\' '.' 空白 → 删除
+    - 'id414478124'      → 转成 '414478124'（再由 _IOS_ID_RE 认成 iOS id）
+    返回规整后的字符串；后续仍要走 _IOS_ID_RE / clean_package_name / is_package_name。"""
+    if not raw:
+        return ""
+    s = raw.strip()
+    # 1. Apple URL → iOS 数字 ID（最优先，URL 里其他字符不干扰）
+    m = _APPLE_URL_ID_RE.search(s)
+    if m:
+        return m.group(1)
+    # 2. Google Play URL → 包名
+    m = _GPLAY_URL_PKG_RE.search(s)
+    if m:
+        return m.group(1)
+    # 3. 去掉头尾杂斜杠/点号/空白
+    #    例：'/com.tencent.mm' → 'com.tencent.mm'
+    #        '...com.tencent.mm' → 'com.tencent.mm'
+    #        'com.tencent.mm...' → 'com.tencent.mm'
+    s = s.strip('/\\.·。 \t\r\n')
+    # 4. 'id12345678' → '12345678'
+    m = _ID_PREFIX_RE.match(s)
+    if m:
+        return m.group(1)
+    return s
+
+
 def clean_app_name(name):
     """清理App名称：去掉副标题/介绍部分"""
     for sep in [' - ', '-', '—', '－', ' – ', ':', '：', '|']:
@@ -982,8 +1047,15 @@ def clean_ios_url(url):
 
 
 def is_package_name(s):
-    """判断输入是否为包名格式（含点号的字母数字组合）"""
-    return bool(re.match(r'^[a-zA-Z0-9._\-]+$', s)) and '.' in s
+    """判断输入是否为包名格式（含点号的字母数字组合）。
+    必须：字符集合法 + 至少一个点 + 至少一个字母数字（避免 '...' / '---' 这种纯分隔符被当包名）。"""
+    if not s or not re.match(r'^[a-zA-Z0-9._\-]+$', s):
+        return False
+    if '.' not in s:
+        return False
+    if not re.search(r'[a-zA-Z0-9]', s):
+        return False
+    return True
 
 
 def _extended_cross_fill(task_type, value, rows):
@@ -4108,7 +4180,11 @@ def api_query():
     total_raw = len(all_valid)
     skipped_over_limit = max(0, total_raw - MAX_ITEMS)
 
-    for item in all_valid[:MAX_ITEMS]:
+    for item_raw in all_valid[:MAX_ITEMS]:
+        item = _pre_normalize_input(item_raw)
+        if not item:
+            invalid_count += 1
+            continue
         if _IOS_ID_RE.match(item):
             ios_id_list.append(item)
         else:
@@ -4127,9 +4203,32 @@ def api_query():
                 seen.add(x); out.append(x)
         return out
 
-    cleaned_pkgs    = dedup(pkg_list)
+    def dedup_ci(lst):
+        """不区分大小写去重，并统一小写返回。
+        安卓包名约定全小写（com.tencent.mm）；iTunes bundle id 查询也不分大小写。
+        用户从 Excel 粘贴常见 'COM.TENCENT.MM' 混写——
+        (1) 查询时 API 按小写匹配，避免查不到；
+        (2) 结果展示也落成 'com.tencent.mm' 符合惯例。"""
+        seen, out = set(), []
+        for x in lst:
+            k = x.lower()
+            if k not in seen:
+                seen.add(k); out.append(k)
+        return out
+
+    def dedup_name(lst):
+        """应用名去重：对 latin 部分不区分大小写，同时折叠连续空白。
+        例：'微信 '  '微信'  'WeChat'  'wechat' → 只留前两条代表。"""
+        seen, out = set(), []
+        for x in lst:
+            k = re.sub(r'\s+', ' ', x).strip().lower()
+            if k and k not in seen:
+                seen.add(k); out.append(x)
+        return out
+
+    cleaned_pkgs    = dedup_ci(pkg_list)
     cleaned_ios_ids = dedup(ios_id_list)
-    cleaned_names   = dedup(name_list)
+    cleaned_names   = dedup_name(name_list)
 
     total_valid = len(cleaned_pkgs) + len(cleaned_ios_ids) + len(cleaned_names)
     deduplicated = max(0, (total_raw - skipped_over_limit) - total_valid - invalid_count)
