@@ -2534,7 +2534,11 @@ def _extract_app_name_from_titles(titles, snippets, package_name):
 
     _noise = {"下载", "安装", "官网", "应用", "软件", "版本", "更新", "手机", "最新", "免费", "正版",
               "谷歌", "官方", "独立版", "手表版", "旧版本", "安卓", "手游", "游戏", "客户端",
-              "安装包", "汉化版", "中文版", "破解版", "精简版"}
+              "安装包", "汉化版", "中文版", "破解版", "精简版",
+              # 应用商店 / 搜索站自称——这些是站点名，绝不是应用名
+              "应用宝", "腾讯软件中心", "腾讯应用宝", "豌豆荚", "百度手机助手", "360手机助手",
+              "小米应用商店", "华为应用市场", "OPPO软件商店", "vivo应用商店", "应用商店",
+              "酷安", "TapTap", "七麦数据", "七麦", "软件中心", "手机软件"}
     for noise in _noise:
         vote_counter.pop(noise, None)
 
@@ -3167,10 +3171,13 @@ def query_single(package_name, android_store_order=None, timeout_override=None):
             pass
 
     # ── 第2层：搜索引擎反查（头条懒触发，之后搜狗+360并发） ────────────────
-    # 例外：iOS 专属 bundle id（含 iphone / ipad / ios / iphoneclient 段）
-    # 真安卓商店查不到是正常的，不要去搜索引擎里乱猜名字，避免把 APK 站广告名
-    # （"支付宝精简版下载"等）当作结果塞回来。
-    if android_result is None and _looks_like_ios_only_bundle_id(package_name):
+    # 例外 A：iOS 专属 bundle id（含 iphone / ipad / ios 段），例：com.alipay.iphoneclient
+    # 例外 B：Apple 已查到同名 iOS 应用 + 所有真 Android 商店都没命中，
+    #        说明这是 iOS-only bundle id（com.tencent.xin / com.ss.iphone.ugc.Aweme 等），
+    #        不要再去搜索引擎乱猜名字——会拿回应用宝 / 豌豆荚等站点名当应用名。
+    #        跨端补全（extended_search）会用 iOS app_name 反查真正的安卓包。
+    _ios_only_sure = bool(ios_result and not _store_results)
+    if android_result is None and (_looks_like_ios_only_bundle_id(package_name) or _ios_only_sure):
         pass  # 直接跳过，让 Android 留空；iOS 结果单独从 Apple 查
     elif android_result is None:
         # 懒触发头条搜索（到这里主商店 + flyme 全漏，才值得跑搜索引擎）
