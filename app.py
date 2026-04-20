@@ -1171,6 +1171,25 @@ def _is_template_package_name(pkg):
     return False
 
 
+_IOS_ONLY_BUNDLE_SEGMENTS = {
+    "iphone", "ipad", "ios", "iphoneclient", "ipadclient", "iosclient",
+    "iphoneapp", "ipadapp", "iosapp", "iphonex", "appletv", "mac",
+    "macos", "iosdevices", "iwatch",
+}
+def _looks_like_ios_only_bundle_id(pkg):
+    """识别 iOS 专属 bundle id：包名里有 iphone / ipad / ios 等典型 iOS 段。
+    这类 id Android 侧必然查不到真货，只会被 APK 站广告名污染，应跳过搜索引擎反查。
+    例：com.alipay.iphoneclient 是大陆支付宝的 iOS bundle id，Android 版包名是 com.eg.android.AlipayGphone。"""
+    if not pkg:
+        return False
+    low = pkg.lower().strip()
+    # 精确段命中（避免误伤 com.iphonegames 这种罕见段）
+    for seg in re.split(r'[\._\-]', low):
+        if seg in _IOS_ONLY_BUNDLE_SEGMENTS:
+            return True
+    return False
+
+
 def _is_apk_direct_url(url):
     """判断 URL 是否是「APK 直链」（时效性 CDN 下载链接），而不是稳定的商店详情页。
     这类 URL 不应放到"商店地址"列（会过期，且点开不是商店页面）。"""
@@ -3148,7 +3167,12 @@ def query_single(package_name, android_store_order=None, timeout_override=None):
             pass
 
     # ── 第2层：搜索引擎反查（头条懒触发，之后搜狗+360并发） ────────────────
-    if android_result is None:
+    # 例外：iOS 专属 bundle id（含 iphone / ipad / ios / iphoneclient 段）
+    # 真安卓商店查不到是正常的，不要去搜索引擎里乱猜名字，避免把 APK 站广告名
+    # （"支付宝精简版下载"等）当作结果塞回来。
+    if android_result is None and _looks_like_ios_only_bundle_id(package_name):
+        pass  # 直接跳过，让 Android 留空；iOS 结果单独从 Apple 查
+    elif android_result is None:
         # 懒触发头条搜索（到这里主商店 + flyme 全漏，才值得跑搜索引擎）
         if future_toutiao is None:
             future_toutiao = _QUERY_POOL.submit(_search_toutiao_json, package_name, kw_query)
