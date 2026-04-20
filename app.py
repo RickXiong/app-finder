@@ -3343,14 +3343,32 @@ def query_by_name_extended(name, android_store_order=None, exact_search=False,
 
 # ========== 路由 ==========
 
+def _asset_mtime(*relpaths):
+    """静态资源版本号：取所有传入文件 mtime 的最大值（int 秒）。
+    文件改动后客户端自动拉到新版，避免浏览器拿旧 JS/CSS。"""
+    base = os.path.dirname(os.path.abspath(__file__))
+    latest = 0
+    for rel in relpaths:
+        p = os.path.join(base, rel)
+        try:
+            m = int(os.path.getmtime(p))
+            if m > latest:
+                latest = m
+        except Exception:
+            pass
+    return str(latest or int(time.time()))
+
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    v = _asset_mtime("static/main-v4.js", "static/style-v4.css", "templates/index.html")
+    return render_template("index.html", asset_v=v)
 
 
 @app.route("/legacy")
 def index_legacy():
-    return render_template("index-legacy.html")
+    v = _asset_mtime("static/main-legacy.js", "static/style-legacy.css", "templates/index-legacy.html")
+    return render_template("index-legacy.html", asset_v=v)
 
 
 @app.route("/api/retry", methods=["POST"])
