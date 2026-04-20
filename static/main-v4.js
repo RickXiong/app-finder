@@ -569,9 +569,99 @@
     /* ---------- 历史记录（复用老版 localStorage key） ---------- */
     const HISTORY_KEY = 'app_finder_history';
     const MAX_HISTORY = 100;
+    const SHARED_KEY = 'app_finder_shared_history_enabled';
+    const DEVICE_ID_KEY = 'app_finder_device_id';
+    const DEVICE_NAME_KEY = 'app_finder_device_name';
+
+    function getDeviceId() {
+        let id = null;
+        try { id = localStorage.getItem(DEVICE_ID_KEY); } catch {}
+        if (!id) {
+            id = 'dev-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+            try { localStorage.setItem(DEVICE_ID_KEY, id); } catch {}
+        }
+        return id;
+    }
+    function getDeviceName() {
+        try {
+            const n = localStorage.getItem(DEVICE_NAME_KEY);
+            if (n) return n;
+        } catch {}
+        // 默认猜一个名字：平台 + 浏览器
+        const ua = navigator.userAgent || '';
+        let plat = 'Device';
+        if (/iPhone/.test(ua)) plat = 'iPhone';
+        else if (/iPad/.test(ua)) plat = 'iPad';
+        else if (/Android/.test(ua)) plat = 'Android';
+        else if (/Mac/.test(ua)) plat = 'Mac';
+        else if (/Windows/.test(ua)) plat = 'Windows';
+        else if (/Linux/.test(ua)) plat = 'Linux';
+        return plat;
+    }
+    function setDeviceName(name) {
+        try { localStorage.setItem(DEVICE_NAME_KEY, name); } catch {}
+    }
+    const MY_DEVICE_ID = getDeviceId();
+    let sharedHistoryEnabled = false;
+    try { sharedHistoryEnabled = localStorage.getItem(SHARED_KEY) === '1'; } catch {}
+    let _serverHistoryCache = [];  // 最近一次从服务端拉到的合并用缓存
+
     function loadHistory() {
         try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; }
         catch { return []; }
+    }
+    function loadHistoryMerged() {
+        // 本地 + 服务端共享（仅当用户开启共享时合并）
+        const local = loadHistory();
+        if (!sharedHistoryEnabled) return local;
+        const byKey = new Map();
+        for (const h of local) {
+            const k = (h.timestamp || h.time || 0) + '|' + JSON.stringify(h.packages || []);
+            byKey.set(k, h);
+        }
+        for (const s of _serverHistoryCache) {
+            const sPackages = s.lines || s.packages || [];
+            const k = (s.timestamp || 0) + '|' + JSON.stringify(sPackages);
+            if (byKey.has(k)) continue;
+            byKey.set(k, {
+                packages: sPackages,
+                label: sPackages.length > 1 ? `${sPackages[0]} 等${sPackages.length}个` : (sPackages[0] || ''),
+                appNames: (s.results || []).filter(r => r && r.app_name && r.app_name !== '未找到').map(r => r.app_name).slice(0, 5),
+                isBatch: sPackages.length > 1,
+                time: s.timestamp || 0,
+                timestamp: s.timestamp || 0,
+                results: s.results || [],
+                _device_id: s.device_id || '',
+                _device_name: s.device_name || (s.saved_by === 'server' ? '服务端自动' : '其他设备'),
+                _from_server: true,
+            });
+        }
+        return [...byKey.values()].sort((a, b) => (b.timestamp || b.time || 0) - (a.timestamp || a.time || 0));
+    }
+    async function refreshServerHistory() {
+        if (!sharedHistoryEnabled) return;
+        try {
+            const r = await fetch('/api/history');
+            const d = await r.json();
+            _serverHistoryCache = Array.isArray(d.history) ? d.history : [];
+        } catch { _serverHistoryCache = []; }
+    }
+    async function pushEntryToServer(entry) {
+        if (!sharedHistoryEnabled) return;
+        try {
+            await fetch('/api/history', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry: {
+                    timestamp: entry.timestamp || entry.time || Date.now(),
+                    lines: entry.packages || [],
+                    results: entry.results || [],
+                    count: (entry.results || []).length,
+                    device_id: MY_DEVICE_ID,
+                    device_name: getDeviceName(),
+                } }),
+            });
+        } catch {}
     }
     function saveHistoryList(list) {
         try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); }
@@ -592,12 +682,15 @@
             time: Date.now(),
             timestamp: Date.now(),
             results: results.slice(0, 60),
+            device_id: MY_DEVICE_ID,
+            device_name: getDeviceName(),
         };
         let list = loadHistory();
         list = list.filter(h => JSON.stringify(h.packages) !== JSON.stringify(packageNames));
         list.unshift(entry);
         if (list.length > MAX_HISTORY) list = list.slice(0, MAX_HISTORY);
         saveHistoryList(list);
+        pushEntryToServer(entry);
         renderHistory();
     }
     function timeAgo(ts) {
@@ -614,9 +707,16 @@
         input.focus();
     }
     function renderHistory() {
-        const list = loadHistory();
+        const list = loadHistoryMerged();
         const total = $('#historyTotal');
         if (total) total.textContent = list.length;
+        // 同步设备名显示 & toggle 状态
+        const devLabel = $('#deviceNameLabel');
+        if (devLabel) devLabel.textContent = getDeviceName();
+        const chk = $('#chkSharedHistory');
+        if (chk) chk.checked = sharedHistoryEnabled;
+        const clearShared = $('#btnHistoryClearShared');
+        if (clearShared) clearShared.hidden = !sharedHistoryEnabled;
         const strip = $('#recentStrip');
         if (strip) {
             if (!list.length) {
@@ -641,10 +741,15 @@
             } else {
                 drawerList.innerHTML = list.map((h, i) => {
                     const hasResults = h.results && h.results.length;
+                    const fromOther = h._from_server || (h.device_id && h.device_id !== MY_DEVICE_ID);
+                    const badge = fromOther
+                        ? `<span class="v4-hist-device-badge other" title="来自其它设备">${esc(h._device_name || h.device_name || '其他设备')}</span>`
+                        : '';
                     return `
                     <div class="v4-hist-item" data-hist-idx="${i}">
                         <span class="label">${esc(h.label)}</span>
                         ${h.appNames && h.appNames.length ? `<span class="app-names">(${esc(h.appNames[0])}${h.appNames.length > 1 ? '…' : ''})</span>` : ''}
+                        ${badge}
                         <span class="time">${timeAgo(h.time || h.timestamp || Date.now())}</span>
                         ${hasResults ? `<button class="v4-hist-show" data-hist-show="${i}" title="直接显示上次查询结果">显示</button>` : ''}
                     </div>
@@ -653,13 +758,70 @@
         }
     }
 
-    $('#btnHistory').addEventListener('click', () => {
+    async function openHistoryDrawer() {
         renderHistory();
         $('#historyMask').hidden = false;
+        if (sharedHistoryEnabled) {
+            await refreshServerHistory();
+            renderHistory();
+        }
+    }
+    $('#btnHistory').addEventListener('click', openHistoryDrawer);
+    $('#btnMoreHistory').addEventListener('click', openHistoryDrawer);
+
+    // 共享开关：默认关闭；开启时弹警告
+    $('#chkSharedHistory').addEventListener('change', async (e) => {
+        if (e.target.checked) {
+            const ok = confirm(
+                '⚠ 开启"共享局域网历史"后：\n\n' +
+                '• 本机的查询历史会上传到服务端，局域网里任何能打开本服务的人都能看到；\n' +
+                '• 同时你也会看到其他设备留下的历史；\n' +
+                '• 条目里可能含应用名 / 包名 / 下载链接，请确认局域网内没有不信任的人。\n\n' +
+                '确定开启吗？'
+            );
+            if (!ok) { e.target.checked = false; return; }
+            sharedHistoryEnabled = true;
+            try { localStorage.setItem(SHARED_KEY, '1'); } catch {}
+            // 把本机已有记录一次性推到服务端，方便其他设备能看到
+            const local = loadHistory();
+            for (const h of local.slice(0, 20)) pushEntryToServer(h);
+            await refreshServerHistory();
+            toast('共享已开启');
+        } else {
+            sharedHistoryEnabled = false;
+            try { localStorage.setItem(SHARED_KEY, '0'); } catch {}
+            _serverHistoryCache = [];
+            toast('共享已关闭，仅显示本机历史');
+        }
+        renderHistory();
     });
-    $('#btnMoreHistory').addEventListener('click', () => {
-        renderHistory();
-        $('#historyMask').hidden = false;
+
+    // 改设备名
+    $('#btnRenameDevice').addEventListener('click', (e) => {
+        e.preventDefault();
+        const cur = getDeviceName();
+        const next = prompt('为此设备起一个方便辨认的名字（只本地使用，下次查询会带到共享历史）：', cur);
+        if (next && next.trim()) {
+            setDeviceName(next.trim().slice(0, 24));
+            renderHistory();
+            toast('已改名：' + next.trim().slice(0, 24));
+        }
+    });
+
+    // 清空服务端共享历史（仅本机管理员能生效，后端会校验）
+    $('#btnHistoryClearShared').addEventListener('click', async () => {
+        if (!confirm('确定清空服务端共享历史？（所有设备的共享记录都会被删除，不影响本机本地）')) return;
+        try {
+            const r = await fetch('/api/history', { method: 'DELETE' });
+            const d = await r.json();
+            if (d.ok) {
+                _serverHistoryCache = [];
+                renderHistory();
+                toast('服务端共享历史已清空');
+            } else {
+                toast('清空失败：' + (d.error || '无权限'));
+            }
+        } catch (err) { toast('清空失败：' + err.message); }
     });
     $('#btnHistoryClose').addEventListener('click', () => { $('#historyMask').hidden = true; });
     $('#historyMask').addEventListener('click', (e) => {
@@ -676,7 +838,7 @@
         if (show) {
             e.stopPropagation();
             const idx = parseInt(show.dataset.histShow, 10);
-            const list = loadHistory();
+            const list = loadHistoryMerged();
             const entry = list[idx];
             if (entry && entry.results && entry.results.length) {
                 currentResults = entry.results.slice();
@@ -699,7 +861,7 @@
         const el = e.target.closest('[data-hist-idx]');
         if (!el) return;
         const idx = parseInt(el.dataset.histIdx, 10);
-        const list = loadHistory();
+        const list = loadHistoryMerged();
         if (list[idx]) applyHistory(list[idx]);
     });
     renderHistory();
@@ -808,7 +970,12 @@
         enterLoading(lines.length);
         currentResults = [];
         iconRetry.clear();
-        delete input.dataset.raw;
+        // 保留本次提交的原始多行输入，供查询后折叠 / focus 展开使用
+        if (lines.length > 1) {
+            input.dataset.raw = lines.join('\n');
+        } else {
+            delete input.dataset.raw;
+        }
         try {
             const r = await fetch('/api/start_job', {
                 method: 'POST',
@@ -1354,6 +1521,15 @@
             window.open(url, '_blank');
             return;
         }
+        if (e.target.closest('a')) return;
+        // 1) 细粒度 copyable（.v4-app-name / 其他内联 span 等），优先于整格
+        const inner = e.target.closest('.copyable[data-copy]');
+        if (inner && inner.dataset.copy) {
+            e.stopPropagation();
+            copyToClipboard(inner.dataset.copy).then(() => toast('已复制：' + inner.dataset.copy.slice(0, 48))).catch(() => toast('复制失败'));
+            return;
+        }
+        // 2) 整格（td.copyable，如包名整格）
         const td = e.target.closest('td.copyable');
         if (td && td.dataset.copy) {
             copyToClipboard(td.dataset.copy).then(() => toast('已复制：' + td.dataset.copy.slice(0, 48))).catch(() => toast('复制失败'));
@@ -1402,7 +1578,8 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    results: currentResults,
+                    // 导出顺序与当前画面（筛选+排序+冻结序）完全一致
+                    results: sortedRows(),
                     format,
                     include_icon: $('#chkIncludeIconUrl').checked,
                     include_icon_image: format === 'xlsx' && $('#chkIncludeIconImage').checked,

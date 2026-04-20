@@ -532,32 +532,32 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   line-height: 22px;
   font-size: 14px;
 }
-/* Google 风：结果页搜索框更紧凑 */
+/* 结果页搜索框统一使用首页样式（只在尺寸上收敛，视觉保持一致） */
 .v4-root.has-results .v4-searchbox {
-  border-radius: 22px;
-  box-shadow: none;
+  border-radius: 24px;
+  box-shadow: var(--shadow-xs);
   border-color: var(--border);
 }
 .v4-root.has-results .v4-searchbox:focus-within {
-  box-shadow: 0 1px 6px oklch(0.2 0.02 250 / 0.12);
+  box-shadow: 0 1px 6px oklch(0.2 0.02 250 / 0.12), 0 0 0 4px var(--brand-soft);
   border-color: var(--border-strong);
 }
-.v4-root.has-results .v4-advanced-popover { border-radius: 0 0 22px 22px; }
+.v4-root.has-results .v4-advanced-popover { border-radius: 0 0 24px 24px; }
 .v4-root.has-results .v4-searchbox.adv-open {
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
 }
 .v4-root.has-results .v4-search-top {
-  padding: 6px 14px;
-  min-height: 36px;
+  padding: 10px 16px;
+  min-height: 44px;
 }
 .v4-root.has-results .v4-search-clear,
 .v4-root.has-results .v4-paste-btn,
 .v4-root.has-results .v4-adv-btn,
 .v4-root.has-results .v4-search-btn {
-  width: 28px; height: 28px;
+  width: 32px; height: 32px;
 }
-.v4-root.has-results .v4-search-divider { height: 16px; }
+.v4-root.has-results .v4-search-divider { height: 18px; }
 .v4-root.has-results .v4-search-inner {
   flex-direction: row;
   align-items: center;
@@ -1081,7 +1081,30 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   padding: 14px 16px; border-bottom: 1px solid var(--border);
 }
 .v4-drawer-body { flex: 1; overflow-y: auto; padding: 8px; }
-.v4-drawer-foot { padding: 10px 16px; border-top: 1px solid var(--border); text-align: right; }
+.v4-drawer-foot { padding: 10px 16px; border-top: 1px solid var(--border); text-align: right; display: flex; gap: 8px; justify-content: flex-end; }
+.v4-drawer-sub {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 13px;
+}
+.v4-shared-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.v4-shared-toggle input { cursor: pointer; }
+.v4-shared-hint { color: var(--text-tertiary); font-size: 12px; }
+.v4-shared-hint a { color: var(--brand); text-decoration: none; }
+.v4-shared-hint a:hover { text-decoration: underline; }
+.v4-hist-device-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  background: oklch(from var(--brand) l c h / 0.12);
+  color: var(--brand);
+  border: 1px solid oklch(from var(--brand) l c h / 0.25);
+}
+.v4-hist-device-badge.other { background: oklch(0.92 0.03 60); color: oklch(0.45 0.1 60); border-color: oklch(0.85 0.08 60); }
 
 .v4-hist-item {
   display: flex; align-items: center; gap: 8px;

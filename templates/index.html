@@ -222,11 +222,19 @@
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                 </button>
             </div>
+            <div class="v4-drawer-sub" id="sharedHistoryBar">
+                <label class="v4-shared-toggle">
+                    <input type="checkbox" id="chkSharedHistory">
+                    <span>共享局域网历史</span>
+                </label>
+                <span class="v4-shared-hint" id="sharedHistoryHint">（此设备：<b id="deviceNameLabel">—</b>·<a href="#" id="btnRenameDevice">改名</a>）</span>
+            </div>
             <div class="v4-drawer-body" id="historyList">
                 <div class="v4-inline-history-empty">暂无历史</div>
             </div>
             <div class="v4-drawer-foot">
-                <button class="btn ghost sm" id="btnHistoryClear">清空历史</button>
+                <button class="btn ghost sm" id="btnHistoryClear">清空本地历史</button>
+                <button class="btn ghost sm" id="btnHistoryClearShared" hidden>清空共享历史</button>
             </div>
         </div>
     </div>
