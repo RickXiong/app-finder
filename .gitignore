@@ -34,3 +34,4 @@ launchd.log
 qimai_cookies.json
 .env
 *.token
+.venv-dev/

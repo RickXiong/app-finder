@@ -7,6 +7,45 @@
     const $ = (sel) => document.querySelector(sel);
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+    /* 复制兼容：HTTP(非安全上下文) 或旧浏览器下 navigator.clipboard 不可用，
+       回退到 execCommand + textarea。手机通过 LAN IP 访问大部分是 http://，
+       必须有 fallback，否则所有"点击复制"在手机上都静默失败。 */
+    function copyToClipboard(text) {
+        text = String(text == null ? '' : text);
+        // 优先 async API（https / localhost / localhost-like 下可用）
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                return navigator.clipboard.writeText(text);
+            }
+        } catch (_) {}
+        // 回退：临时 textarea + execCommand('copy')
+        return new Promise((resolve, reject) => {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.top = '-1000px';
+                ta.style.left = '0';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                ta.setSelectionRange(0, text.length);
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                ok ? resolve() : reject(new Error('execCommand copy failed'));
+            } catch (e) { reject(e); }
+        });
+    }
+    // 统一的读取剪贴板（粘贴），用于 btnPaste
+    async function readClipboard() {
+        if (navigator.clipboard && window.isSecureContext && navigator.clipboard.readText) {
+            return await navigator.clipboard.readText();
+        }
+        throw new Error('clipboard read not available in insecure context');
+    }
+
     /* ---------- 常量 ---------- */
     const PENDING_JOB_KEY = 'app_finder_pending_job';
     const BATCH_WARN_THRESHOLD = 50;
@@ -52,12 +91,15 @@
 
     $('#btnPaste').addEventListener('click', async () => {
         try {
-            const t = await navigator.clipboard.readText();
+            const t = await readClipboard();
             if (!t) return;
             input.value = input.value ? input.value + '\n' + t : t;
             updateInputUI();
             input.focus();
-        } catch (e) { console.warn('clipboard read failed', e); }
+        } catch (e) {
+            // HTTP/非安全上下文下读剪贴板被浏览器拒绝，提示用户手动粘贴
+            toast('请长按输入框手动粘贴（浏览器安全限制）');
+        }
     });
 
     input.addEventListener('keydown', (e) => {
@@ -87,9 +129,14 @@
         setAdvOpen(false);
     });
 
-    const filters = { platform: 'all', match: 'fuzzy', ext: new Set() };
+    // opts: 行为开关（默认都开）。extended = 跨端补全；keep = 保留输入
+    const filters = { platform: 'all', match: 'fuzzy', ext: new Set(), opts: new Set(['extended', 'keep']) };
+    const OPT_DEFAULTS = new Set(['extended', 'keep']);
     const updateAdvBadge = () => {
-        const dirty = filters.platform !== 'all' || filters.match !== 'fuzzy' || filters.ext.size > 0;
+        // opts 与默认值不同才算"脏"：默认都开，只有关掉某个才算用户修改
+        const optsDirty = filters.opts.size !== OPT_DEFAULTS.size
+            || [...OPT_DEFAULTS].some(k => !filters.opts.has(k));
+        const dirty = filters.platform !== 'all' || filters.match !== 'fuzzy' || filters.ext.size > 0 || optsDirty;
         advBadge.hidden = !dirty;
     };
     const updateExtDisabled = () => {
@@ -108,9 +155,10 @@
             const btn = e.target.closest('.v4-chip');
             if (!btn || btn.classList.contains('disabled')) return;
             const v = btn.dataset.value;
-            if (name === 'ext') {
-                if (filters.ext.has(v)) { filters.ext.delete(v); btn.classList.remove('on'); }
-                else { filters.ext.add(v); btn.classList.add('on'); }
+            if (name === 'ext' || name === 'opts') {
+                const set = filters[name];
+                if (set.has(v)) { set.delete(v); btn.classList.remove('on'); }
+                else { set.add(v); btn.classList.add('on'); }
             } else {
                 filters[name] = v;
                 group.querySelectorAll('.v4-chip').forEach(b => b.classList.toggle('on', b.dataset.value === v));
@@ -121,9 +169,11 @@
     });
     $('#btnResetAdv').addEventListener('click', () => {
         filters.platform = 'all'; filters.match = 'fuzzy'; filters.ext.clear();
+        filters.opts = new Set(OPT_DEFAULTS);
         document.querySelectorAll('[data-group="platform"] .v4-chip').forEach(b => b.classList.toggle('on', b.dataset.value === 'all'));
         document.querySelectorAll('[data-group="match"] .v4-chip').forEach(b => b.classList.toggle('on', b.dataset.value === 'fuzzy'));
         document.querySelectorAll('[data-group="ext"] .v4-chip').forEach(b => b.classList.remove('on'));
+        document.querySelectorAll('[data-group="opts"] .v4-chip').forEach(b => b.classList.toggle('on', OPT_DEFAULTS.has(b.dataset.value)));
         updateExtDisabled(); updateAdvBadge();
     });
 
@@ -348,7 +398,7 @@
             const urlCard = body.querySelector('.v4-lan-url-card');
             if (urlCard) urlCard.addEventListener('click', (e) => {
                 const url = e.currentTarget.dataset.copy;
-                if (url) navigator.clipboard.writeText(url).then(() => toast('已复制地址'));
+                if (url) copyToClipboard(url).then(() => toast('已复制地址')).catch(() => toast('复制失败'));
             });
             const tog = body.querySelector('#lanToggle');
             if (tog && isAdmin) {
@@ -513,7 +563,7 @@
     });
     $('#aboutWechatId').addEventListener('click', () => {
         const id = $('#aboutWechatId').textContent.trim();
-        navigator.clipboard.writeText(id).then(() => toast('已复制微信号：' + id));
+        copyToClipboard(id).then(() => toast('已复制微信号：' + id)).catch(() => toast('复制失败'));
     });
 
     /* ---------- 历史记录（复用老版 localStorage key） ---------- */
@@ -753,6 +803,7 @@
             query_interval_ms: getIntervalMs(),
             platform_filter: filters.platform === 'ios' ? 'iOS'
                            : filters.platform === 'android' ? 'Android' : 'all',
+            extended_search: filters.opts.has('extended'),
         };
         enterLoading(lines.length);
         currentResults = [];
@@ -831,6 +882,14 @@
                 closeStream();
                 clearPending();
                 if (currentJob && currentJob.lines) saveToHistory(currentJob.lines, currentResults);
+                // 保留输入开关关闭时：查询完成自动清空输入框
+                if (!filters.opts.has('keep')) {
+                    try {
+                        input.value = '';
+                        delete input.dataset.raw;
+                        input.dispatchEvent(new Event('input'));
+                    } catch {}
+                }
                 sendNotification(currentResults.length);
                 if (ev.over_limit) toast('⚠ 部分结果被截断（超出限制）');
                 if (ev.invalid_count) toast(`跳过 ${ev.invalid_count} 条无效输入`);
@@ -959,16 +1018,24 @@
     /* ---------- 完整性判定 ---------- */
     // 完整性判定：照抄老版 main-legacy.js 逻辑（四个核心字段）
     function markIncomplete() {
+        // 判定规则（与后端一致）：
+        // - 只有找不到「关键字段」（app_name + download_url）时才算不完整，
+        //   会进「重查不完整」通道。
+        // - icon / category 缺失属于「锦上添花」，不影响完整度判定，也不进重查。
+        // - 一个包名只存在于单端（iOS-only 或 Android-only）属于正常——后端此时
+        //   根本不会返回另一端的行，所以不会在 currentResults 里看到「缺」的另一端。
         for (const r of currentResults) {
             const missing = [];
             if (!r.package_name) missing.push('package_name');
             if (!r.platform) missing.push('platform');
             if (!r.app_name || r.app_name === '未找到') missing.push('app_name');
-            if (!r.icon_url) missing.push('icon_url');
-            if (!r.category) missing.push('category');
             if (!r.download_url) missing.push('download_url');
-            if (missing.length) { r.incomplete = true; r.missing_fields = missing; }
-            else { r.incomplete = false; r.missing_fields = []; }
+            // 非关键字段：仅记录，不标 incomplete
+            const soft = [];
+            if (!r.icon_url) soft.push('icon_url');
+            if (!r.category) soft.push('category');
+            if (missing.length) { r.incomplete = true; r.missing_fields = missing.concat(soft); }
+            else { r.incomplete = false; r.missing_fields = soft; }
         }
     }
 
@@ -997,8 +1064,18 @@
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
                     </span>
                 </span>`;
-            case 'app_name':
-                return `<span class="v4-app-name">${esc(r.app_name || (r._notFound ? '未找到' : '-'))}</span>`;
+            case 'app_name': {
+                const name = r.app_name || (r._notFound ? '未找到' : '');
+                if (!name || name === '未找到') {
+                    return `<span class="v4-app-name">${esc(name || '-')}</span>`;
+                }
+                // 跨端补全的结果打一个极小的「补」badge，提示可能非严格同一 App
+                const extBadge = r.extended_fill
+                    ? ` <span class="v4-ext-badge" title="跨端补全结果：根据另一端 App 名反查，可能非严格同一应用">补</span>`
+                    : '';
+                // 点击 app 名即复制
+                return `<span class="v4-app-name copyable" data-copy="${esc(name)}" title="点击复制">${esc(name)}</span>${extBadge}`;
+            }
             case 'package_name':
                 return `<code class="mono v4-pkg">${esc(r.package_name || '')}</code>`;
             case 'platform': {
@@ -1021,6 +1098,8 @@
                 </span>`;
             }
             case 'download_url': {
+                // iOS 不存在 APK 直链概念——明确告诉用户这是「本身没有」，不是「没查到」
+                if (r.platform === 'iOS') return '<span class="v4-na" title="该字段仅 Android 有">iOS 无此项</span>';
                 if (r.platform !== 'Android') return '-';
                 const urls = r.apk_direct_urls || [];
                 if (!urls.length) return '<span style="color:var(--text-quaternary)">—</span>';
@@ -1030,8 +1109,10 @@
                 </span>`).join('<br>');
             }
             case 'sha1':
+                if (r.platform === 'iOS') return '<span class="v4-na" title="该字段仅 Android 有">iOS 无此项</span>';
                 return r.sha1 ? `<span class="v4-sha mono" title="${esc(r.sha1)} (点击复制)">${esc(r.sha1)}</span>` : '-';
             case 'sha256':
+                if (r.platform === 'iOS') return '<span class="v4-na" title="该字段仅 Android 有">iOS 无此项</span>';
                 return r.sha256 ? `<span class="v4-sha mono" title="${esc(r.sha256)} (点击复制)">${esc(r.sha256)}</span>` : '-';
             case 'actions':
                 if (!r.incomplete || !r.package_name) return '';
@@ -1128,9 +1209,11 @@
                 r._notFound ? 'not-found' : '',
             ].filter(Boolean).join(' ');
             const tds = cols.map(c => {
-                const copyable = ['package_name', 'sha1', 'sha256'].includes(c.key) && r[c.key];
-                const copyAttr = copyable ? ` data-copy="${esc(r[c.key])}"` : '';
-                const tdCls = [c.key === 'icon' ? 'v4-cell-icon' : '', copyable ? 'copyable' : ''].filter(Boolean).join(' ');
+                // app_name 的复制落在内部 span 上（只响应名字本身的点击，不覆盖整格），
+                // 其他列（package_name / sha1 / sha256）可在 td 层级整体点击复制。
+                const tdCopyable = ['package_name', 'sha1', 'sha256'].includes(c.key) && r[c.key];
+                const copyAttr = tdCopyable ? ` data-copy="${esc(r[c.key])}"` : '';
+                const tdCls = [c.key === 'icon' ? 'v4-cell-icon' : '', tdCopyable ? 'copyable' : ''].filter(Boolean).join(' ');
                 return `<td class="${tdCls}"${copyAttr}>${renderCell(c, r)}</td>`;
             }).join('');
             return `<tr class="${cls}">${tds}</tr>`;
@@ -1156,7 +1239,7 @@
             <div class="v4-card${r.incomplete ? ' incomplete' : ''}">
                 <div class="v4-card-icon">${r.icon_url ? `<img src="${esc(r.icon_url)}" />` : ''}</div>
                 <div class="v4-card-main">
-                    <div class="v4-card-name">${esc(r.app_name || '未找到')}</div>
+                    <div class="v4-card-name${r.app_name ? ' copyable' : ''}"${r.app_name ? ` data-copy="${esc(r.app_name)}" title="点击复制"` : ''}>${esc(r.app_name || '未找到')}</div>
                     <div class="v4-card-pkg mono copyable" data-copy="${esc(r.package_name || '')}">${esc(r.package_name || '')}</div>
                     <div class="v4-card-row">${renderCell({key:'platform'}, r)} · ${esc(r.category || '-')}</div>
                     ${storeHtml || apkHtml ? `<div class="v4-card-row">${[storeHtml, apkHtml].filter(Boolean).join(' · ')}</div>` : ''}
@@ -1252,7 +1335,7 @@
         const btn = e.target.closest('.v4-copy-mini');
         if (!btn || !btn.dataset.copy) return;
         e.preventDefault(); e.stopPropagation();
-        navigator.clipboard.writeText(btn.dataset.copy).then(() => toast('已复制链接'));
+        copyToClipboard(btn.dataset.copy).then(() => toast('已复制链接')).catch(() => toast('复制失败'));
     });
 
     /* ---------- 卡片点击复制 ---------- */
@@ -1260,7 +1343,7 @@
         if (e.target.closest('a')) return;
         const el = e.target.closest('.copyable[data-copy]');
         if (!el || !el.dataset.copy) return;
-        navigator.clipboard.writeText(el.dataset.copy).then(() => toast('已复制：' + el.dataset.copy.slice(0, 48)));
+        copyToClipboard(el.dataset.copy).then(() => toast('已复制：' + el.dataset.copy.slice(0, 48))).catch(() => toast('复制失败'));
     });
 
     /* ---------- 单元格点击复制 ---------- */
@@ -1273,7 +1356,7 @@
         }
         const td = e.target.closest('td.copyable');
         if (td && td.dataset.copy) {
-            navigator.clipboard.writeText(td.dataset.copy).then(() => toast('已复制：' + td.dataset.copy.slice(0, 48)));
+            copyToClipboard(td.dataset.copy).then(() => toast('已复制：' + td.dataset.copy.slice(0, 48))).catch(() => toast('复制失败'));
         }
     });
 
@@ -1310,7 +1393,7 @@
         const cols = visibleCols().filter(c => c.key !== 'icon');
         const header = cols.map(c => c.label).join('\t');
         const body = currentResults.map(r => cols.map(c => cellText(r, c.key).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t')).join('\n');
-        navigator.clipboard.writeText(header + '\n' + body).then(() => toast('已复制 ' + currentResults.length + ' 行'));
+        copyToClipboard(header + '\n' + body).then(() => toast('已复制 ' + currentResults.length + ' 行')).catch(() => toast('复制失败'));
     });
 
     async function downloadResults(format) {
@@ -1374,6 +1457,8 @@
         if (!pkg || btn.disabled) return;
         btn.disabled = true;
         btn.classList.add('loading');
+        // 重查这一条 → 冻结当前顺序，让填回来的行留在原位置
+        pinDisplayOrder();
         try {
             const r = await fetch('/api/retry', {
                 method: 'POST',
@@ -1399,6 +1484,8 @@
         btn.disabled = true;
         const oldLabel = btn.textContent;
         btn.textContent = '重查中…';
+        // 冻结顺序，填回来的行保留在原位
+        pinDisplayOrder();
         try {
             const r = await fetch('/api/retry', {
                 method: 'POST',

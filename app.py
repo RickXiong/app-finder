@@ -66,6 +66,24 @@ def _lower_process_priority():
 _lower_process_priority()
 
 
+# Windows 下子进程（arp / ipconfig / launchctl...）默认会闪出黑色 cmd 窗口。
+# LAN 共享开启后每隔几秒轮询 /api/lan_stats，内部会调 subprocess 解析 MAC / hostname，
+# 结果就是「另外的设备连接时有黑框一闪」。所有 subprocess.run 都套上 CREATE_NO_WINDOW。
+def _subprocess_kwargs():
+    if os.name != "nt":
+        return {}
+    kw = {"creationflags": 0x08000000}  # CREATE_NO_WINDOW
+    try:
+        import subprocess as _sp
+        si = _sp.STARTUPINFO()
+        si.dwFlags |= _sp.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        kw["startupinfo"] = si
+    except Exception:
+        pass
+    return kw
+
+
 # ============================================================
 # 性能优化：共享 HTTP 会话 + 选用最快的 HTML 解析器
 # ============================================================
@@ -335,6 +353,7 @@ def _get_all_local_ips():
                 r = subprocess.run(
                     ["ipconfig", "getifaddr", iface],
                     capture_output=True, text=True, timeout=1.5,
+                    **_subprocess_kwargs(),
                 )
                 ip = (r.stdout or "").strip()
                 if ip:
@@ -370,6 +389,7 @@ def _get_mac_for_ip(ip):
         r = subprocess.run(
             ["arp", "-n", ip],
             capture_output=True, text=True, timeout=1.5,
+            **_subprocess_kwargs(),
         )
         m = re.search(r"\bat\s+([0-9a-fA-F:]+)\b", r.stdout or "")
         if m:
@@ -420,6 +440,48 @@ def _save_history():
     try:
         with open(_HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(_HISTORY, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _server_side_save_history(raw_inputs, results):
+    """服务端在查询完成时主动写一条历史。
+    即使用户提前关了浏览器，只要后端跑完，历史记录就留下，不丢。
+    entry 结构与前端 saveToHistory 对齐：{timestamp, lines, results, count}。"""
+    try:
+        lines = [str(x).strip() for x in (raw_inputs or []) if str(x).strip()]
+        if not lines:
+            return
+        slim = []
+        for r in (results or [])[:60]:
+            if not isinstance(r, dict):
+                continue
+            slim.append({
+                "package_name": r.get("package_name", ""),
+                "app_name": r.get("app_name", ""),
+                "platform": r.get("platform", ""),
+                "icon_url": r.get("icon_url", ""),
+                "download_url": r.get("download_url", ""),
+                "category": r.get("category", ""),
+                "source": r.get("source", ""),
+            })
+        entry = {
+            "timestamp": int(time.time() * 1000),
+            "lines": lines,
+            "results": slim,
+            "count": len(slim),
+            "saved_by": "server",  # 标记：服务端自动记录，非用户手动点击
+        }
+        with _HISTORY_LOCK:
+            # 去重：相同 lines + 5 秒窗内的只保留最新
+            now = entry["timestamp"]
+            def _dup(h):
+                return (h.get("lines") == lines
+                        and abs((h.get("timestamp") or 0) - now) < 5000)
+            _HISTORY[:] = [h for h in _HISTORY if not _dup(h)]
+            _HISTORY.insert(0, entry)
+            del _HISTORY[_HISTORY_MAX:]
+        _save_history()
     except Exception:
         pass
 
@@ -480,6 +542,7 @@ def _parse_query_input(req_data):
     get_sha256          = bool(req_data.get("get_sha256", False))
     platform_filter     = req_data.get("platform_filter", "all")
     query_interval_ms   = max(0, int(req_data.get("query_interval_ms", 0)))
+    extended_search     = bool(req_data.get("extended_search", True))
 
     MAX_ITEMS = 10000
     pkg_list, ios_id_list, name_list = [], [], []
@@ -551,6 +614,8 @@ def _parse_query_input(req_data):
         "get_sha1":            get_sha1,
         "get_sha256":          get_sha256,
         "platform_filter":     platform_filter,
+        "extended_search":     extended_search,
+        "raw_inputs":          list(raw_inputs or []),
         "BATCH_SIZE":          BATCH_SIZE,
         "WORKERS":             WORKERS,
         "BATCH_DELAY":         BATCH_DELAY,
@@ -583,6 +648,8 @@ def _job_worker(job_id):
     get_sha1            = wp['get_sha1']
     get_sha256          = wp['get_sha256']
     platform_filter     = wp['platform_filter']
+    extended_search     = wp.get('extended_search', True)
+    raw_inputs_saved    = wp.get('raw_inputs', [])
 
     def push(event):
         job['events'].append(event)
@@ -637,6 +704,13 @@ def _job_worker(job_id):
                         result = None
 
                     rows = _make_fallback_rows(task_type, value, result)
+
+                    # 跨端补全（和 /api/query 同一逻辑）
+                    if extended_search and platform_filter == "all":
+                        try:
+                            rows = _extended_cross_fill(task_type, value, rows)
+                        except Exception:
+                            pass
 
                     # ── 会话自愈侦测 ──
                     # 判断本次"是否拿到真正结果"：rows 里至少一条不是 _mark_incomplete 兜底。
@@ -788,6 +862,8 @@ def _job_worker(job_id):
 
                 push({'type': 'retry_done'})
 
+        # 服务端落一份历史（关页面也不丢）
+        _server_side_save_history(raw_inputs_saved, all_results)
         push({'type': 'complete', 'results': all_results, **meta})
         job['status'] = 'done'
         job['results'] = all_results
@@ -796,6 +872,7 @@ def _job_worker(job_id):
     except Exception:
         job['status'] = 'done'
         job['results'] = all_results
+        _server_side_save_history(raw_inputs_saved, all_results)
         push({'type': 'complete', 'results': all_results, **meta})
         _save_job_result(job_id, all_results)
 
@@ -909,6 +986,119 @@ def is_package_name(s):
     return bool(re.match(r'^[a-zA-Z0-9._\-]+$', s)) and '.' in s
 
 
+def _extended_cross_fill(task_type, value, rows):
+    """跨端补全：当一次查询只拿到单端数据（且这端有真实 app_name）时，
+    用那个 app_name 去反向查另一端。典型场景：
+      - 用户输了 iOS bundle id，拿到 iOS app 名「支付宝」
+        → 用名字反查安卓商店拿到 Android 「支付宝」
+      - 用户输了安卓包名，拿到 Android app 名
+        → 用 Apple iTunes API 反查 iOS
+    只在「另一端完全没结果 or 只是 qimai 兜底」时才补；已经有另一端真实结果不动。
+    补回来的行打 source 后缀 "+ext"，前端可据此给标识。
+    """
+    if not rows:
+        return rows
+
+    def _real_row(r):
+        return bool(r.get("app_name") and r["app_name"] != "未找到"
+                    and r.get("source") != "qimai_hint")
+
+    ios_rows = [r for r in rows if r.get("platform") == "iOS"]
+    and_rows = [r for r in rows if r.get("platform") == "Android"]
+    has_real_ios = any(_real_row(r) for r in ios_rows)
+    has_real_android = any(_real_row(r) for r in and_rows)
+
+    appended = []
+
+    # iOS→Android 补全：只有 iOS 有真实结果、安卓没有
+    if has_real_ios and not has_real_android:
+        ios_r = next(r for r in ios_rows if _real_row(r))
+        app_name = ios_r.get("app_name", "")
+        if app_name and len(app_name) >= 1:
+            try:
+                and_fill = _search_android_by_name_single(app_name)
+            except Exception:
+                and_fill = None
+            if and_fill and is_name_relevant(app_name, and_fill.get("app_name", "")):
+                and_fill["source"] = (and_fill.get("source", "") + "+ext").strip("+") or "ext"
+                appended.append(_mark_incomplete({
+                    "package_name": and_fill.get("package_name", ""),
+                    "platform": "Android",
+                    "app_name": and_fill.get("app_name", ""),
+                    "download_url": and_fill.get("download_url", ""),
+                    "icon_url": and_fill.get("icon_url", ""),
+                    "category": and_fill.get("category", ""),
+                    "source": and_fill["source"],
+                    "_orig_task_type": task_type,
+                    "_orig_value": value,
+                    "extended_fill": True,  # 前端据此打 badge
+                }))
+
+    # Android→iOS 补全
+    if has_real_android and not has_real_ios:
+        and_r = next(r for r in and_rows if _real_row(r))
+        app_name = and_r.get("app_name", "")
+        if app_name and len(app_name) >= 1:
+            try:
+                ios_list = search_apple_by_name(app_name, limit=3) or []
+            except Exception:
+                ios_list = []
+            ios_fill = next(
+                (r for r in ios_list
+                 if is_name_relevant(app_name, r.get("app_name", ""))),
+                None
+            )
+            if ios_fill:
+                appended.append(_mark_incomplete({
+                    "package_name": ios_fill.get("package_name", ""),
+                    "platform": "iOS",
+                    "app_name": ios_fill.get("app_name", ""),
+                    "download_url": ios_fill.get("download_url", ""),
+                    "icon_url": ios_fill.get("icon_url", ""),
+                    "category": ios_fill.get("category", ""),
+                    "source": "apple+ext",
+                    "_orig_task_type": task_type,
+                    "_orig_value": value,
+                    "extended_fill": True,
+                }))
+
+    if appended:
+        # 剔除原先的 qimai 兜底行（那是「占位」，现在有真实补齐就不需要了）
+        rows = [r for r in rows if r.get("source") != "qimai_hint"]
+        rows.extend(appended)
+    return rows
+
+
+def _search_android_by_name_single(name):
+    """跨端补全专用的简化版安卓名称搜索：并发跑主流商店，取最相关的一条。
+    不做排序/丰富，只要拿到一条像样的结果就返回。"""
+    order = get_ranked_store_order()
+    funcs = [(sid, STORE_NAME_SEARCH_FUNCS[sid])
+             for sid in order if sid in STORE_NAME_SEARCH_FUNCS]
+    if not funcs:
+        return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(funcs)) as exe:
+        futs = {sid: exe.submit(fn, name) for sid, fn in funcs}
+        for sid, f in futs.items():
+            try:
+                results = f.result(timeout=HTTP_TIMEOUT + 1) or []
+            except Exception:
+                continue
+            for r in results:
+                if _is_template_package_name(r.get("package_name", "")):
+                    continue
+                if is_name_relevant(name, r.get("app_name", "")):
+                    return {
+                        "package_name": r.get("package_name", ""),
+                        "app_name": r.get("app_name", ""),
+                        "download_url": r.get("download_url", ""),
+                        "icon_url": r.get("icon_url", ""),
+                        "category": r.get("category", ""),
+                        "source": r.get("source", sid),
+                    }
+    return None
+
+
 def _make_fallback_rows(task_type, value, result):
     """整理查询结果行，无结果时保证七麦兜底。
     标记 _orig_task_type / _orig_value，供会话自愈 + 补齐阶段按原 task_type 正确重查。"""
@@ -952,6 +1142,33 @@ def _make_fallback_rows(task_type, value, result):
             r.setdefault("_orig_task_type", "name")
             r.setdefault("_orig_value", value)
         return rows
+
+
+_TEMPLATE_PKG_PREFIXES = (
+    "com.example.", "com.test.", "com.demo.", "com.max.custom",
+    "com.company.", "com.yourname.", "com.app.", "com.mycompany.",
+    "com.android.apps.", "com.ionicframework.",
+)
+_TEMPLATE_PKG_EXACT = {
+    "com.max.custom",           # 千鸟物联误匹配用例里拿到的"占位包名"
+    "com.example",
+    "com.test",
+}
+
+
+def _is_template_package_name(pkg):
+    """判断是不是"开发者懒得改的模板占位包名"。
+    这类包名经常被上传到各种应用商店，导致名称搜索误命中完全无关的 App。
+    例：搜"千鸟物联" → Bing 反查得到 com.max.custom → 应用宝上果然有这个包但内容对不上。"""
+    if not pkg:
+        return True
+    low = pkg.lower().strip()
+    if low in _TEMPLATE_PKG_EXACT:
+        return True
+    for p in _TEMPLATE_PKG_PREFIXES:
+        if low.startswith(p):
+            return True
+    return False
 
 
 def _is_apk_direct_url(url):
@@ -1639,6 +1856,10 @@ def query_by_name(name, android_store_order=None, exact_search=False):
                         if not results:
                             continue
                         for r in results:
+                            # 过滤模板包名（com.max.custom 等占位包）——这种包名常被开发者
+                            # 懒得改就上传到商店，搜索词再相关也极可能是错误匹配
+                            if _is_template_package_name(r.get("package_name", "")):
+                                continue
                             an = r.get("app_name", "").strip().lower()
                             nm = name.strip().lower()
                             if an == nm:
@@ -1654,6 +1875,9 @@ def query_by_name(name, android_store_order=None, exact_search=False):
 
         # 策略2：Bing 搜索包名（国内可用）
         bing_pkgs = search_bing_for_android_package(name, 5)
+        # 过滤明显的"模板/占位包名"——这类包名在商店里可能存在但内容完全对不上
+        # （例：搜"千鸟物联" Bing 反查得到 com.max.custom，再查应用宝就命中错位结果）
+        bing_pkgs = [p for p in (bing_pkgs or []) if not _is_template_package_name(p)]
 
         for pkg_list in [bing_pkgs]:
             for pkg in (pkg_list or []):
@@ -1949,9 +2173,14 @@ def search_tencent(package_name):
         if resp.status_code != 200:
             return None
 
+        # 明显的模板/占位包名直接拒绝——避免上游 Bing 反查把错误包名塞进来
+        if _is_template_package_name(package_name):
+            return None
+
         app_name = ""
         icon_url = ""
         category = ""
+        json_validated = False  # JSON 路径拿到数据且 pkg_name 匹配时才置 True
 
         # ---- 首选：__NEXT_DATA__ JSON ----
         try:
@@ -1978,6 +2207,7 @@ def search_tencent(package_name):
                         category = (first.get("cate_name_new")
                                     or first.get("cate_name")
                                     or "")
+                        json_validated = True
                         break
         except Exception:
             pass
@@ -2001,7 +2231,17 @@ def search_tencent(package_name):
                     if icon_url.startswith("//"):
                         icon_url = "https:" + icon_url
 
+        # 严格校验：优先采用 JSON 验证过的结果。
+        # HTML 回退只在 JSON 完全拿不到的情况下才信任，且 app_name 不能是商店通用标题。
         if app_name and app_name != "应用宝" and "404" not in app_name:
+            if not json_validated:
+                # HTML 回退：标题里若含"应用宝"、"app下载"、"手机游戏"等商店模板字样，
+                # 说明 sj.qq.com 落到了首页/404 占位页，丢弃。
+                _bad_markers = ("应用宝", "手机游戏", "软件商店", "app 下载", "appstore",
+                                "下载安装", "下载_", "未知应用")
+                low_name = app_name.lower().strip()
+                if any(m in low_name for m in _bad_markers) or len(low_name) < 2:
+                    return None
             # icon 如果只是 http:// 协议，升级到 https 方便前端展示
             if icon_url.startswith("http://"):
                 icon_url = "https://" + icon_url[len("http://"):]
@@ -3707,7 +3947,7 @@ def _set_startup(enable):
             with open(plist_path, "w") as f:
                 f.write(plist_content)
             import subprocess
-            subprocess.run(["launchctl", "load", plist_path], capture_output=True)
+            subprocess.run(["launchctl", "load", plist_path], capture_output=True, **_subprocess_kwargs())
             return True, "已添加开机启动"
         except Exception as e:
             return False, f"添加失败: {e}"
@@ -3715,7 +3955,7 @@ def _set_startup(enable):
         try:
             if os.path.exists(plist_path):
                 import subprocess
-                subprocess.run(["launchctl", "unload", plist_path], capture_output=True)
+                subprocess.run(["launchctl", "unload", plist_path], capture_output=True, **_subprocess_kwargs())
                 os.remove(plist_path)
             return True, "已取消开机启动"
         except Exception as e:
@@ -3807,6 +4047,7 @@ def api_query():
     get_sha256   = bool(req_data.get("get_sha256", False))
     platform_filter = req_data.get("platform_filter", "all")  # "all"|"ios"|"android"
     query_interval_ms = max(0, int(req_data.get("query_interval_ms", 0)))
+    extended_search = bool(req_data.get("extended_search", True))  # 跨端补全：默认开
 
 
     # ── 输入解析（同步，generator 外完成）──────────────────────────
@@ -3925,6 +4166,15 @@ def api_query():
                     # 整理本条结果（无结果时保证七麦兜底）
                     rows = _make_fallback_rows(task_type, value, result)
 
+                    # ── 跨端补全（extended_search）──────────────────────────
+                    # 仅当用户没走平台筛选（filter=all）时才尝试补；筛选 iOS-only 或
+                    # Android-only 时反而强加对面的结果会让用户困惑。
+                    if extended_search and platform_filter == "all":
+                        try:
+                            rows = _extended_cross_fill(task_type, value, rows)
+                        except Exception:
+                            pass
+
                     new_rows = []
                     for r in rows:
                         # 平台筛选
@@ -3948,6 +4198,8 @@ def api_query():
                 jitter = BATCH_DELAY * random.uniform(0.8, 1.2)
                 time.sleep(jitter)
 
+        # 服务端落历史：用户关页面也留得下来
+        _server_side_save_history(raw_inputs, all_results)
         yield f"data: {json.dumps({'type': 'complete', 'results': all_results, **meta})}\n\n"
 
     resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
@@ -4151,6 +4403,7 @@ def _get_lan_ip():
                 r = subprocess.run(
                     ["ipconfig", "getifaddr", iface],
                     capture_output=True, text=True, timeout=1.5,
+                    **_subprocess_kwargs(),
                 )
                 ip = (r.stdout or "").strip()
                 if _is_real_lan_ip(ip):

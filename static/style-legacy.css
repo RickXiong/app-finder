@@ -2008,3 +2008,33 @@ body.is-lan-guest .admin-only { display: none !important; }
     .result-table td[data-label]::before { min-width: 48px; font-size: 11px; }
     .lan-share-qr { width: 160px; height: 160px; }
 }
+
+/* ==== 返回新版入口（右上角贴边） ==== */
+.legacy-back-to-new {
+    position: fixed;
+    top: 12px;
+    right: 14px;
+    z-index: 50;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: #2b6cb0;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: 0 2px 6px rgba(43, 108, 176, 0.25);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.legacy-back-to-new:hover {
+    background: #2c5282;
+    box-shadow: 0 3px 10px rgba(43, 108, 176, 0.35);
+    transform: translateY(-1px);
+}
+.legacy-back-to-new svg { opacity: 0.95; }
+
+@media (max-width: 720px) {
+    .legacy-back-to-new { top: 8px; right: 8px; padding: 5px 10px; font-size: 11px; }
+}

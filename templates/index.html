@@ -2,7 +2,10 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#ffffff" />
     <title>AppLookup · App 信息批量查询</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon-v4.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -106,6 +109,13 @@
                             <button type="button" class="v4-chip" data-value="sha1">SHA1</button>
                             <button type="button" class="v4-chip" data-value="sha256">SHA256</button>
                             <span class="v4-adv-hint">仅 Android · 耗时较长</span>
+                        </div>
+                    </div>
+                    <div class="v4-adv-row">
+                        <span class="v4-adv-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/><circle cx="12" cy="12" r="3"/></svg>行为</span>
+                        <div class="v4-adv-chips" data-group="opts">
+                            <button type="button" class="v4-chip on" data-value="extended" title="例：只输了 iOS bundle，但拿到 App 名后自动反查安卓">跨端补全</button>
+                            <button type="button" class="v4-chip on" data-value="keep" title="关闭后查询完成自动清空输入">保留输入</button>
                         </div>
                     </div>
                     <button type="button" class="btn ghost sm v4-adv-reset" id="btnResetAdv">重置</button>
