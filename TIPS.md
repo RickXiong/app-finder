@@ -28,6 +28,8 @@
 | 17 | V4 把 `platform_filter` 发成 `"iOS"/"Android"` 大小写，后端比较小写 → 筛选形同虚设 | ✅ |
 | 18 | 跨端补全被 `platform_filter == "all"` 这道门反向拦截（筛单平台时不给补） | ✅ |
 | 19 | `.v4-searchbox { overflow: hidden }` 把 absolute 定位的高级面板裁掉 | ✅ |
+| 20 | Homebrew python@3.12 默认不带 `_tkinter` → PyInstaller .app 启动时静默 import 失败、Flask 不起 | ✅ |
+| 21 | Werkzeug 3.x 启动反向 DNS 查询能慢 15-20s，smoke-test 必须用 poll-until-up 而非固定 sleep | ✅ |
 
 ---
 
@@ -444,6 +446,56 @@ com.ss.iphone.ugc.aweme.lite + filter=android + extended=off
 **教训**：`position:absolute` 子元素受 **最近有 `overflow:visible` 以外值的定位祖先** 裁切。在父级加 overflow 前务必看有没有 absolute 子元素要溢出。
 
 **代码位置**：`static/style-v4.css` line ≈1044 的 `@media (max-width:720px)` 块。
+
+---
+
+## #20 Homebrew python@3.12 默认不带 `_tkinter` → PyInstaller .app 启动时静默 import 失败 ✅
+
+**场景**：用 `.venv-dev`（homebrew python@3.12 建的）打出 mac arm64 .app 后，双击/命令行启动，Flask 打印 "Serving Flask app 'app' / Debug mode: off" 就再没后续，`netstat` 看端口 9528 始终不 LISTEN。用 `sample <pid>` 抓栈看到卡在 `setipaddr` / `socket_gethostbyaddr`——但真正的根因在更早：主线程 `import tkinter as tk` 抛 `ModuleNotFoundError: No module named '_tkinter'`，整个进程立即崩；只是 Flask 的 daemon 线程已经起了一半日志。
+
+**根因**：
+1. macOS 上 `brew install python@3.12` **不包含 `_tkinter` C 扩展**（和 3.14 不同；也和 Apple `/usr/bin/python3` 不同）。需要额外装 `brew install python-tk@3.12` 才能 `import tkinter`。
+2. spec 里写了 `hiddenimports = ['tkinter']`，但 PyInstaller 只能打进"构建机器上已装"的东西——源头没 `_tkinter.so`，spec 写再漂亮也没用。
+3. app.py 的 Mac 分支依赖 tkinter 跑主循环（注册 NSApplication / 给 Dock 图标用），tkinter import 炸 = 整个 .app 失效。
+
+**验法**：
+```bash
+.venv-dev/bin/python3 -c "import tkinter; print(tkinter.__file__)"
+# 能输出路径 = OK；ModuleNotFoundError _tkinter = 需要 brew install python-tk@3.12
+```
+
+**修法**：
+```bash
+brew install python-tk@3.12    # 装进 python@3.12 的 framework，不用重建 venv
+# 然后重新 pyinstaller ...
+```
+
+**教训**：每次换打包机器 / 升级 python 小版本后，**在 PyInstaller 之前先 smoke-test `import tkinter`**。这是 macOS .app 不启动的 #1 静默杀手——所有看起来像"Flask 启动慢"、"端口不 listen"的症状都可能是这货。
+
+---
+
+## #21 Werkzeug 3.x 启动反向 DNS 查询慢 15-20s，smoke-test 需 poll-until-up ✅
+
+**场景**：.app 已修好 tkinter 问题，跑起来 Flask 日志到 "Debug mode: off" 就停，5-10s curl 打过去依然 000。差点以为又坏了，结果多等到 19s 突然打印 "Running on all addresses (0.0.0.0)" + 响应 200。
+
+**根因**：Werkzeug 3.1.x 的 `run_simple` 启动末尾要列出 bind 到的所有接口 URL，对每个非 loopback IP 调 `socket.gethostbyaddr()` 做反查。macOS 上有 Warp/Tailscale/多网卡时这步能卡 15-20s，但**不阻塞已经 bind 好的 TCP listener**——所以进程确实在监听，只是还没打印那条日志。
+
+**影响**：
+- 用户双击 .app，`webbrowser.open` 在 1.5s 后打开浏览器，看到 "Connection refused" / "无法连接"，会误以为程序坏了。
+- 测试脚本用固定 `sleep 5; curl ...` 会得到 000，冤枉程序没起。
+
+**修法（测试侧）**：smoke-test 一律用 poll-until-up 循环，至少给 30s 上限：
+```bash
+for i in $(seq 1 30); do
+  CODE=$(curl -s --max-time 1 --noproxy "*" -o /dev/null -w "%{http_code}" http://127.0.0.1:9528/ 2>/dev/null)
+  if [ "$CODE" = "200" ]; then echo "UP at ${i}s"; break; fi
+  sleep 1
+done
+```
+
+**修法（产品侧）**：暂不处理。用户首次遇到 "连接失败" 页面，F5 刷新一次就能正常进。正经修要 monkey-patch werkzeug 或迁到 waitress/gunicorn，成本大收益小，先留坑。
+
+**教训**："日志停在某一行" ≠ "进程挂了"。拿 `sample <pid>` 抓栈 5 秒，看是不是卡在某个具体的 syscall（gethostbyaddr / bind / accept），比瞎猜省时。
 
 ---
 
