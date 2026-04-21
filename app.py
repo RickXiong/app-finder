@@ -1092,6 +1092,10 @@ def _extended_cross_fill(task_type, value, rows):
             except Exception:
                 and_fill = None
             if and_fill and is_name_relevant(app_name, and_fill.get("app_name", "")):
+                # 搜狗/应用宝搜索只返回 pkg+name，category/icon 常为空——
+                # 拿到 pkg 后再回主流商店（小米/华为/豌豆荚/...）查一次包名，
+                # 把分类、图标、稳定商店链接补齐，让"补"行也是完整信息。
+                _enrich_crossfill_android(and_fill)
                 and_fill["source"] = (and_fill.get("source", "") + "+ext").strip("+") or "ext"
                 appended.append(_mark_incomplete({
                     "package_name": and_fill.get("package_name", ""),
@@ -1169,6 +1173,57 @@ def _search_android_by_name_single(name):
                         "source": r.get("source", sid),
                     }
     return None
+
+
+def _enrich_crossfill_android(fill):
+    """对跨端补全得到的安卓行做二次丰富：如果 category / icon_url / 稳定下载页
+    缺失，按 pkg 并发跑一遍主流商店（xiaomi/tencent/wandoujia/...），
+    拿到的第一个非空字段补进去。
+
+    背景：_search_android_by_name_single 只用 wandoujia + sogou 按名字搜，
+    sogou 命中率最高但只返回 pkg+name（没有 category/icon）。
+    场景：用户输 com.ss.iphone.ugc.Aweme (iOS) → 跨端补 Android
+    com.ss.android.ugc.aweme，但分类/图标空着——直接输 Android 包名时
+    却能拿到分类。两条路径结果不一致，用户会困惑。这里对齐到"直接查"。
+    """
+    if not fill:
+        return
+    pkg = (fill.get("package_name") or "").strip()
+    if not pkg:
+        return
+    need_cat = not fill.get("category")
+    need_icon = not fill.get("icon_url")
+    # 下载链接是 APK 直链或空 → 当作"待补"
+    dl = fill.get("download_url") or ""
+    need_dl = (not dl) or _is_apk_direct_url(dl)
+    if not (need_cat or need_icon or need_dl):
+        return
+
+    # 跑一圈按用户优先级排好的商店（pkg 查询，单商店延时不高）
+    try:
+        order = get_ranked_store_order()
+    except Exception:
+        order = list(STORE_SEARCH_FUNCS.keys())
+    funcs = [(sid, STORE_SEARCH_FUNCS[sid]) for sid in order if sid in STORE_SEARCH_FUNCS]
+    if not funcs:
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(funcs))) as exe:
+        futs = {sid: exe.submit(fn, pkg) for sid, fn in funcs}
+        for sid, f in futs.items():
+            try:
+                r = f.result(timeout=HTTP_TIMEOUT + 1)
+            except Exception:
+                continue
+            if not r:
+                continue
+            if need_cat and r.get("category"):
+                fill["category"] = r["category"]; need_cat = False
+            if need_icon and r.get("icon_url"):
+                fill["icon_url"] = r["icon_url"]; need_icon = False
+            if need_dl and r.get("download_url") and not _is_apk_direct_url(r["download_url"]):
+                fill["download_url"] = r["download_url"]; need_dl = False
+            if not (need_cat or need_icon or need_dl):
+                break
 
 
 def _make_fallback_rows(task_type, value, result):

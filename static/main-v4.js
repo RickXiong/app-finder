@@ -188,8 +188,19 @@
 
     /* ---------- 查询间隔持久化 ---------- */
     const INTERVAL_KEY = 'app_finder_query_interval_ms';
-    const getIntervalMs = () => {
-        try { return parseInt(localStorage.getItem(INTERVAL_KEY) || '0', 10) || 0; } catch { return 0; }
+    // 区分"用户从没改过"和"用户改过并且选了0"——前者在批量(>2行)时自动加 1s
+    // 节流保护商店；后者尊重用户意愿。
+    const _readUserInterval = () => {
+        try { return localStorage.getItem(INTERVAL_KEY); } catch { return null; }
+    };
+    const getIntervalMs = (lineCount = 1) => {
+        const stored = _readUserInterval();
+        if (stored !== null) {
+            const v = parseInt(stored, 10);
+            return Number.isFinite(v) && v >= 0 ? v : 0;
+        }
+        // 用户从未设置：>2 条自动间隔 1s，单条/两条保持 Auto (0)
+        return lineCount > 2 ? 1000 : 0;
     };
     const formatIntervalLabel = (ms) => ms === 0 ? 'Auto' : (ms / 1000).toFixed(1).replace(/\.0$/, '') + 's';
     (function initIntervalSlider() {
@@ -962,7 +973,7 @@
             apk_url_mode: 'single',
             get_sha1: filters.ext.has('sha1'),
             get_sha256: filters.ext.has('sha256'),
-            query_interval_ms: getIntervalMs(),
+            query_interval_ms: getIntervalMs(lines.length),
             platform_filter: filters.platform === 'ios' ? 'iOS'
                            : filters.platform === 'android' ? 'Android' : 'all',
             extended_search: filters.opts.has('extended'),
@@ -1113,11 +1124,30 @@
         $('#inlineProgress').hidden = true;
         const rb = $('#retryBadge'); if (rb) rb.hidden = true;
         $('#toolbarRight').style.visibility = '';
-        const tip = $('#toolbarTip');
-        if (tip) tip.hidden = true;
-        if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }
+        // 结束查询后，将 tip 从"查询中快速轮播"切到"结果页慢速轮播"，
+        // 让"看着结果等下一步"的用户也能顺便学到快捷键/筛选/复制的玩法。
+        _startResultsTips();
         if (bgBannerTimer) { clearTimeout(bgBannerTimer); bgBannerTimer = null; }
         $('#bgBanner').hidden = true;
+    }
+    function _startResultsTips() {
+        const tip = $('#toolbarTip');
+        if (!tip) return;
+        tip.hidden = false;
+        if (!tip.textContent) tip.textContent = nextTip();
+        if (tipsTimer) clearInterval(tipsTimer);
+        tipsTimer = setInterval(() => {
+            tip.classList.add('fade');
+            setTimeout(() => {
+                tip.textContent = nextTip();
+                tip.classList.remove('fade');
+            }, 300);
+        }, 9000);  // 结果页比查询中慢一档（6s→9s），降低视觉干扰
+    }
+    function _stopTips() {
+        if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }
+        const tip = $('#toolbarTip');
+        if (tip) { tip.hidden = true; tip.classList.remove('fade'); }
     }
     function updateProgress(done, total) {
         const t = total || 0;
@@ -1376,10 +1406,15 @@
                 r._notFound ? 'not-found' : '',
             ].filter(Boolean).join(' ');
             const tds = cols.map(c => {
-                // app_name 的复制落在内部 span 上（只响应名字本身的点击，不覆盖整格），
-                // 其他列（package_name / sha1 / sha256）可在 td 层级整体点击复制。
-                const tdCopyable = ['package_name', 'sha1', 'sha256'].includes(c.key) && r[c.key];
-                const copyAttr = tdCopyable ? ` data-copy="${esc(r[c.key])}"` : '';
+                // 统一体验：pkg / sha1 / sha256 / app_name 都整格可点复制。
+                // 光标在 td 任意位置都变成小手，点哪里都是复制那格的核心值。
+                let tdCopyable = false, copyValue = '';
+                if (['package_name', 'sha1', 'sha256'].includes(c.key) && r[c.key]) {
+                    tdCopyable = true; copyValue = r[c.key];
+                } else if (c.key === 'app_name' && r.app_name && r.app_name !== '未找到') {
+                    tdCopyable = true; copyValue = r.app_name;
+                }
+                const copyAttr = tdCopyable ? ` data-copy="${esc(copyValue)}"` : '';
                 const tdCls = [c.key === 'icon' ? 'v4-cell-icon' : '', tdCopyable ? 'copyable' : ''].filter(Boolean).join(' ');
                 return `<td class="${tdCls}"${copyAttr}>${renderCell(c, r)}</td>`;
             }).join('');
@@ -1704,6 +1739,7 @@
             currentJob = null;
             $('#v4Root').classList.remove('has-results');
             $('#resultsZone').hidden = true;
+            _stopTips();
             toast('已取消查询');
         }
     });
@@ -1735,6 +1771,7 @@
         $('#resultsZone').hidden = true;
         $('#bgBanner').hidden = true;
         exitLoading();
+        _stopTips();  // 回首页：停掉结果页的慢轮播
         if (window._measureStickyHeights) window._measureStickyHeights();
         $('#historyMask').hidden = true;
         setAdvOpen(false);
@@ -1769,6 +1806,10 @@
     /* ---------- Google 式折叠输入 ---------- */
     window._collapseInputForResults = function() {
         if (!$('#v4Root').classList.contains('has-results')) return;
+        // 用户正把光标放在输入框里审阅/编辑时，别强行折叠。
+        // 否则流式 progress 触发的 showResults 会把刚展开的多行再压回一行，
+        // 造成"立即点击没多行、等一会才出现"的诡异体验。
+        if (document.activeElement === input) return;
         const raw = input.dataset.raw || input.value;
         const lines = raw.split(/\n+/).map(s => s.trim()).filter(Boolean);
         if (lines.length <= 1) return;
@@ -1776,7 +1817,10 @@
         input.value = lines.join(' ');
         input.style.height = '';
     };
-    input.addEventListener('focus', () => {
+    // 一次性展开为多行原值（抽出来让 focus 和 click 都能调用，避免仅靠
+    // focus 事件时出现的时序漂移——click 在 mousedown→focus→click 链的任一
+    // 节点都应尽快让用户看到原始多行）
+    function _expandInputToMultilineIfAny() {
         if (!$('#v4Root').classList.contains('has-results')) return;
         const raw = input.dataset.raw;
         if (raw && !input.value.includes('\n')) {
@@ -1784,7 +1828,11 @@
             input.style.height = 'auto';
             input.style.height = Math.min(input.scrollHeight, 160) + 'px';
         }
-    });
+    }
+    input.addEventListener('focus', _expandInputToMultilineIfAny);
+    // pointerdown/mousedown 比 focus 更早触发：用户手指一按就展开，不等 focus 链
+    input.addEventListener('pointerdown', _expandInputToMultilineIfAny);
+    input.addEventListener('click', _expandInputToMultilineIfAny);
     input.addEventListener('blur', () => {
         setTimeout(() => {
             if (document.activeElement !== input) window._collapseInputForResults();
