@@ -60,6 +60,179 @@
     ];
     const nextTip = () => (typeof getRandomTip === 'function') ? getRandomTip()
         : _fallbackTips[Math.floor(Math.random() * _fallbackTips.length)];
+    // 结果页专用 —— 使用类 tips（提醒用户"改延迟""跨端补全"等），
+    // tips.js 没加载或老版本时回退到 nextTip()
+    const nextUsageTip = () => (typeof getRandomUsageTip === 'function') ? getRandomUsageTip()
+        : nextTip();
+
+    /* ---------- 访问模式 + 跨浏览器设置同步 ----------
+       同一台电脑上 Chrome / Safari / Firefox 的 localStorage 是沙箱隔离的，
+       想让它们看到"同一套设置和历史"，只能走服务端存一份共享。但这件事只能
+       对"本机访问"做——手机等 LAN 访客的设置仍然走它各自的 localStorage，
+       否则手机改主题会把电脑的也改掉，体验反而变差。
+       "是不是本机"必须问服务端（根据请求源 IP），前端靠 window.location.hostname
+       判不准：用户可能敲 127.0.0.1 / localhost / 本机 LAN IP 三种入口打开，
+       它们 hostname 不一样但其实都是同一台机器。
+       启动策略：先用本地 localStorage 值秒级渲染（不白屏），再异步拉服务端
+       设置"补差覆盖"——这是"渐进增强"的标准姿势。 */
+    const _sync = {
+        isLocal: null,  // null=未知 / true=本机 / false=LAN
+        ready:   false, // bootstrap 完成了没（完成前的 _pushSettings 会被丢弃，避免和首次迁移打架）
+    };
+    /* TIPS #15：每个 tab/浏览器一个 client_id。PUT 带 X-Client-Id header，SSE 订阅带 client_id
+       query 参数。服务端广播时跳过 sender 的那个连接——避免自己改完被服务端 echo 回来重复应用
+       （用户选了方案"不收"）。用 sessionStorage 而非 localStorage：同一浏览器开 2 个 tab 算两个
+       独立"客户端"，各自 SSE，互相也会同步。 */
+    const _clientId = (() => {
+        try {
+            let id = sessionStorage.getItem('app_finder_client_id');
+            if (!id) {
+                id = 'c_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+                sessionStorage.setItem('app_finder_client_id', id);
+            }
+            return id;
+        } catch { return 'c_' + Math.random().toString(36).slice(2); }
+    })();
+    function _gatherLocalSettings() {
+        const s = {};
+        try { const t = localStorage.getItem('applookup_v4_theme'); if (t) s.theme = t; } catch {}
+        try {
+            const iv = localStorage.getItem('app_finder_query_interval_ms');
+            if (iv !== null) {
+                const v = parseInt(iv, 10);
+                if (Number.isFinite(v) && v >= 0) s.interval_ms = v;
+            }
+        } catch {}
+        // TIPS #14: 高级设置 chip 状态（platform/match/ext/opts）一起塞进迁移包，
+        // 老用户首次用 127 模式时，本地 localStorage 里的 filters 能被推到服务端共享。
+        try {
+            const raw = localStorage.getItem('app_finder_v4_filters');
+            if (raw) {
+                const v = JSON.parse(raw);
+                if (v && typeof v === 'object') s.filters = v;
+            }
+        } catch {}
+        return s;
+    }
+    function _applyServerSettings(s) {
+        // 主题：以服务端为准
+        if (s.theme && typeof applyTheme === 'function') {
+            try { localStorage.setItem('applookup_v4_theme', s.theme); } catch {}
+            applyTheme(s.theme);
+        }
+        // 间隔：以服务端为准（同步 slider + label 显示）
+        if (typeof s.interval_ms === 'number' && s.interval_ms >= 0) {
+            try { localStorage.setItem('app_finder_query_interval_ms', String(s.interval_ms)); } catch {}
+            const sl  = document.getElementById('intervalSlider');
+            const lbl = document.getElementById('intervalValText');
+            if (sl) sl.value = s.interval_ms;
+            if (lbl && typeof formatIntervalLabel === 'function') {
+                lbl.textContent = formatIntervalLabel(s.interval_ms);
+            }
+        }
+        // TIPS #14: filters——服务端覆盖 + 回写 localStorage + 刷 chip UI。
+        // 调用点在 IIFE 底部的 _bootstrapSync，那时 _applyFilterSnapshot /
+        // _reflectFiltersToChips 都已定义（它们在 btnResetAdv 下方）。
+        if (s.filters && typeof s.filters === 'object' && typeof _applyFilterSnapshot === 'function') {
+            if (_applyFilterSnapshot(s.filters)) {
+                try { localStorage.setItem('app_finder_v4_filters', JSON.stringify(s.filters)); } catch {}
+                _reflectFiltersToChips();
+            }
+        }
+    }
+    async function _pushSettingsNow(delta) {
+        if (!_sync.isLocal || !_sync.ready) return;
+        if (!delta || !Object.keys(delta).length) return;
+        try {
+            await fetch('/api/settings', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Id':  _clientId,   // TIPS #15: 服务端广播时跳过自己
+                },
+                body: JSON.stringify(delta),
+            });
+        } catch {}
+    }
+    // 暴露给 IIFE 里其它"改设置"的地方调用（主题按钮、间隔 slider ...）
+    window._pushSettings = _pushSettingsNow;
+
+    /* TIPS #15: 订阅 /api/settings_stream —— 其它浏览器 PUT /api/settings 时服务端把
+       最新 snapshot 推给这里，实时同步 theme / interval_ms / filters 等全部白名单字段。
+       EventSource 自带自动重连（默认 3s），断网回来无需手动处理。只在 _sync.isLocal=true
+       时挂；LAN 访客 is_local=false，服务端也会 403 挡掉，连不上。 */
+    let _settingsES = null;
+    function _subscribeSettingsStream() {
+        if (_settingsES) return;
+        try {
+            _settingsES = new EventSource('/api/settings_stream?client_id=' + encodeURIComponent(_clientId));
+            _settingsES.addEventListener('settings', (e) => {
+                try {
+                    const s = JSON.parse(e.data);
+                    if (s && typeof s === 'object') _applyServerSettings(s);
+                } catch {}
+            });
+            // error 事件只记不处理——浏览器已在自动重连
+            _settingsES.addEventListener('error', () => { /* noop, 交给浏览器重连 */ });
+        } catch {
+            _settingsES = null;
+        }
+    }
+
+    async function _bootstrapSync() {
+        try {
+            const r = await fetch('/api/access_mode');
+            if (r.ok) {
+                const d = await r.json();
+                _sync.isLocal = !!d.is_local;
+            } else _sync.isLocal = false;
+        } catch {
+            _sync.isLocal = false;
+        }
+        document.documentElement.setAttribute('data-access-mode', _sync.isLocal ? 'local' : 'lan');
+
+        if (_sync.isLocal) {
+            // 本机模式：拉一次 settings
+            try {
+                const r = await fetch('/api/settings');
+                if (r.ok) {
+                    const d  = await r.json();
+                    const s  = d.settings || {};
+                    const real = Object.keys(s).filter(k => k !== 'updated_at');
+                    if (real.length === 0) {
+                        // 服务端空：把本地现有设置一次性推上去（首次启动 / 老用户迁移）
+                        const local = _gatherLocalSettings();
+                        if (Object.keys(local).length) {
+                            try {
+                                await fetch('/api/settings', {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(local),
+                                });
+                            } catch {}
+                        }
+                    } else {
+                        // 服务端有值：覆盖本地（last-write-wins）
+                        _applyServerSettings(s);
+                    }
+                }
+            } catch {}
+            // 本机模式历史永远共享——强制打开开关、刷新服务端缓存、重绘一次抽屉
+            try {
+                if (typeof sharedHistoryEnabled !== 'undefined') sharedHistoryEnabled = true;
+                localStorage.setItem('app_finder_shared_history_enabled', '1');
+            } catch {}
+            if (typeof refreshServerHistory === 'function') {
+                try {
+                    await refreshServerHistory();
+                    if (typeof renderHistory === 'function') renderHistory();
+                } catch {}
+            }
+            // TIPS #15: 本机模式 bootstrap 结束前挂 SSE 订阅，实时接收其它浏览器的设置改动
+            _subscribeSettingsStream();
+        }
+        _sync.ready = true;
+    }
 
     /* ---------- 主题 ---------- */
     const THEME_KEY = 'applookup_v4_theme';
@@ -84,7 +257,26 @@
     const input = $('#searchInput');
     const btnClear = $('#btnClear');
     const parseLines = (txt) => txt.split('\n').map(s => s.trim()).filter(Boolean);
-    const autoGrow = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; };
+    // TIPS #16 P2 延伸：窄屏下长 placeholder 会被 Safari/iOS 单行截断（"支持批量粘贴"看不全），
+    // 按 viewport 宽度动态换短版文案；用 dataset 保存原版供离开窄屏时还原。
+    const PH_DESKTOP = '输入 App 名或包名，每行一个 · 支持批量粘贴';
+    const PH_MOBILE  = 'App 名 / 包名（可多行粘贴）';
+    const _applyPlaceholder = () => {
+        // 不覆盖"备注编辑态"—— main-v4.js:716 会临时改 placeholder，dataset.phInertia 标记保护
+        if (input.dataset.phInertia) return;
+        input.placeholder = window.matchMedia('(max-width: 720px)').matches ? PH_MOBILE : PH_DESKTOP;
+    };
+    _applyPlaceholder();
+    window.addEventListener('resize', _applyPlaceholder);
+    const autoGrow = () => {
+        input.style.height = 'auto';
+        const sh = input.scrollHeight;
+        // TIPS #16 P2: 窄屏 placeholder 目前是单行短版（见上方 PH_MOBILE），
+        // 不再需要把 min-height 撑到两行。为保持视觉稳定，
+        // 空值时 min 提到 44px 保证可点击区不塌陷。
+        const min = (!input.value && window.matchMedia('(max-width: 720px)').matches) ? 44 : 0;
+        input.style.height = Math.max(min, Math.min(sh, 160)) + 'px';
+    };
     const updateInputUI = () => { btnClear.hidden = !input.value; autoGrow(); };
     input.addEventListener('input', updateInputUI);
     btnClear.addEventListener('click', () => { input.value = ''; updateInputUI(); input.focus(); });
@@ -103,6 +295,8 @@
     });
 
     input.addEventListener('keydown', (e) => {
+        // isComposing: 中文输入法正在选字时，Enter 属于确认候选，不应该触发查询。
+        if (e.isComposing) return;
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); triggerQuery(); }
     });
     $('#btnQuery').addEventListener('click', triggerQuery);
@@ -165,6 +359,7 @@
                 if (name === 'platform') updateExtDisabled();
             }
             updateAdvBadge();
+            _persistFilters();   // TIPS #14: chip 改 → 立刻落盘 + 推服务端
         });
     });
     $('#btnResetAdv').addEventListener('click', () => {
@@ -175,13 +370,70 @@
         document.querySelectorAll('[data-group="ext"] .v4-chip').forEach(b => b.classList.remove('on'));
         document.querySelectorAll('[data-group="opts"] .v4-chip').forEach(b => b.classList.toggle('on', OPT_DEFAULTS.has(b.dataset.value)));
         updateExtDisabled(); updateAdvBadge();
+        _persistFilters();   // 重置也要同步掉线上旧值，别让刷新后服务端 push 复活老设置
     });
+
+    /* ---------- 高级设置持久化（TIPS #14） ----------
+       高级设置 chip 的状态（platform / match / ext / opts）必须跨刷新保留。
+       走"四步不变量"：
+         1) 用户改 chip → filters Set 改 → _persistFilters()       ← 生成 + 存
+         2) IIFE 启动 → 从 localStorage hydrate → _reflectFiltersToChips()  ← 读 + 反映 UI
+         3) 本机 127 模式 → _bootstrapSync 拉服务端 → _applyServerSettings() 内处理 filters ← 跨浏览器同步
+         4) 下面任何 UI 开关新加时，只要调 _persistFilters() 即可，四步自动闭环
+       localStorage key: app_finder_v4_filters
+       序列化形式：{platform: 'all'|..., match: 'fuzzy'|..., ext: ['sha256',...], opts: [...] }
+       —— Set 必须转 array 才能 JSON；hydrate 时再 new Set()。 */
+    const FILTERS_LS_KEY = 'app_finder_v4_filters';
+    function _filtersSnapshot() {
+        return {
+            platform: filters.platform,
+            match:    filters.match,
+            ext:      [...filters.ext],
+            opts:     [...filters.opts],
+        };
+    }
+    function _applyFilterSnapshot(raw) {
+        // 防御：任何字段形状不对就跳过该字段而不是整体崩
+        if (!raw || typeof raw !== 'object') return false;
+        let touched = false;
+        if (typeof raw.platform === 'string') { filters.platform = raw.platform; touched = true; }
+        if (typeof raw.match    === 'string') { filters.match    = raw.match;    touched = true; }
+        if (Array.isArray(raw.ext))  { filters.ext  = new Set(raw.ext.filter(x => typeof x === 'string'));  touched = true; }
+        if (Array.isArray(raw.opts)) { filters.opts = new Set(raw.opts.filter(x => typeof x === 'string')); touched = true; }
+        return touched;
+    }
+    function _reflectFiltersToChips() {
+        document.querySelectorAll('[data-group="platform"] .v4-chip')
+            .forEach(b => b.classList.toggle('on', b.dataset.value === filters.platform));
+        document.querySelectorAll('[data-group="match"] .v4-chip')
+            .forEach(b => b.classList.toggle('on', b.dataset.value === filters.match));
+        document.querySelectorAll('[data-group="ext"] .v4-chip')
+            .forEach(b => b.classList.toggle('on', filters.ext.has(b.dataset.value)));
+        document.querySelectorAll('[data-group="opts"] .v4-chip')
+            .forEach(b => b.classList.toggle('on', filters.opts.has(b.dataset.value)));
+        updateExtDisabled();    // iOS 时 ext 里某些条目要禁用 + 清掉
+        updateAdvBadge();
+    }
+    function _persistFilters() {
+        const snapshot = _filtersSnapshot();
+        try { localStorage.setItem(FILTERS_LS_KEY, JSON.stringify(snapshot)); } catch {}
+        // 127 模式下推服务端（LAN 模式 _pushSettingsNow 里 isLocal=false 会直接 return）
+        if (window._pushSettings) window._pushSettings({ filters: snapshot });
+    }
+    // 启动：从 localStorage hydrate 一次，反映到 chip UI。
+    // 之后 _bootstrapSync 可能异步拉到服务端值 → _applyServerSettings 再 override 一次。
+    try {
+        const raw = JSON.parse(localStorage.getItem(FILTERS_LS_KEY) || 'null');
+        if (_applyFilterSnapshot(raw)) _reflectFiltersToChips();
+    } catch {}
 
     /* ---------- 主题切换按钮（浅色 → 深色 → 跟随系统 循环） ---------- */
     $('#btnTheme').addEventListener('click', () => {
         const cur = loadThemeMode();
         const next = cur === 'light' ? 'dark' : cur === 'dark' ? 'system' : 'light';
         saveThemeMode(next); applyTheme(next);
+        // 本机模式下把新主题同步到服务端，Safari / Firefox 等其它浏览器下次打开就一致
+        if (typeof window._pushSettings === 'function') window._pushSettings({ theme: next });
         const label = next === 'light' ? '浅色' : next === 'dark' ? '深色' : '跟随系统';
         toast('主题：' + label);
     });
@@ -216,6 +468,8 @@
         sl.addEventListener('change', () => {
             const v = parseInt(sl.value, 10) || 0;
             try { localStorage.setItem(INTERVAL_KEY, String(v)); } catch {}
+            // 本机模式下把新间隔同步到服务端，其它浏览器下次打开一致
+            if (typeof window._pushSettings === 'function') window._pushSettings({ interval_ms: v });
             toast('查询间隔已设为 ' + formatIntervalLabel(v));
         });
     })();
@@ -621,33 +875,57 @@
         try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; }
         catch { return []; }
     }
+    // 把服务端历史条目（POST /api/history 存下来的结构）转成抽屉能渲染的本地格式
+    function _serverEntryToLocal(s) {
+        const sPackages = s.lines || s.packages || [];
+        return {
+            packages: sPackages,
+            label:    sPackages.length > 1 ? `${sPackages[0]} 等${sPackages.length}个` : (sPackages[0] || ''),
+            appNames: (s.results || []).filter(r => r && r.app_name && r.app_name !== '未找到').map(r => r.app_name).slice(0, 5),
+            isBatch:  sPackages.length > 1,
+            time:      s.timestamp || 0,
+            timestamp: s.timestamp || 0,
+            results:   s.results || [],
+            _device_id:   s.device_id || '',
+            _device_name: s.device_name || (s.saved_by === 'server' ? '' : '其他设备'),
+            _from_server: true,
+            _saved_by_server: s.saved_by === 'server',
+        };
+    }
+
     function loadHistoryMerged() {
-        // 本地 + 服务端共享（仅当用户开启共享时合并）
-        const local = loadHistory();
+        // 本机模式：历史以服务端为权威源（查询完 _server_side_save_history 已经自动写了），
+        // 不再读本地 localStorage——不然会和服务端那条撞出重复"自己查的 + 服务端自动"。
+        if (_sync.isLocal) {
+            return (_serverHistoryCache || [])
+                .map(_serverEntryToLocal)
+                .sort((a, b) => (b.timestamp || b.time || 0) - (a.timestamp || a.time || 0));
+        }
+        // LAN 模式（手机等）：本地 + 服务端共享（按共享开关）合并
+        const local = loadHistory().map(h => ({ ...h, _source: 'local' }));
         if (!sharedHistoryEnabled) return local;
-        const byKey = new Map();
-        for (const h of local) {
-            const k = (h.timestamp || h.time || 0) + '|' + JSON.stringify(h.packages || []);
-            byKey.set(k, h);
+        const server = (_serverHistoryCache || []).map(s => ({ ..._serverEntryToLocal(s), _source: 'server' }));
+        // 按 packages + 10 秒窗口去重：同一次查询本地写一条、服务端 _server_side_save_history
+        // 也自动写一条，两边 timestamp 不同但 packages 相同。本地优先（用户视角更直观）。
+        const all = [...local, ...server].sort((a, b) => (b.timestamp || b.time || 0) - (a.timestamp || a.time || 0));
+        const result = [];
+        for (const e of all) {
+            const ePkgs = JSON.stringify(e.packages || []);
+            const eTs   = e.timestamp || e.time || 0;
+            const dupIdx = result.findIndex(x =>
+                JSON.stringify(x.packages || []) === ePkgs
+                && Math.abs((x.timestamp || x.time || 0) - eTs) < 10000
+            );
+            if (dupIdx >= 0) {
+                // 已有一条，如果当前是 local 而已存是 server，本地覆盖（保留 device badge 等）
+                if (e._source === 'local' && result[dupIdx]._source === 'server') {
+                    result[dupIdx] = e;
+                }
+                continue;
+            }
+            result.push(e);
         }
-        for (const s of _serverHistoryCache) {
-            const sPackages = s.lines || s.packages || [];
-            const k = (s.timestamp || 0) + '|' + JSON.stringify(sPackages);
-            if (byKey.has(k)) continue;
-            byKey.set(k, {
-                packages: sPackages,
-                label: sPackages.length > 1 ? `${sPackages[0]} 等${sPackages.length}个` : (sPackages[0] || ''),
-                appNames: (s.results || []).filter(r => r && r.app_name && r.app_name !== '未找到').map(r => r.app_name).slice(0, 5),
-                isBatch: sPackages.length > 1,
-                time: s.timestamp || 0,
-                timestamp: s.timestamp || 0,
-                results: s.results || [],
-                _device_id: s.device_id || '',
-                _device_name: s.device_name || (s.saved_by === 'server' ? '服务端自动' : '其他设备'),
-                _from_server: true,
-            });
-        }
-        return [...byKey.values()].sort((a, b) => (b.timestamp || b.time || 0) - (a.timestamp || a.time || 0));
+        return result;
     }
     async function refreshServerHistory() {
         if (!sharedHistoryEnabled) return;
@@ -696,13 +974,29 @@
             device_id: MY_DEVICE_ID,
             device_name: getDeviceName(),
         };
+        // 本机模式：服务端在 /api/query 完成时已经 _server_side_save_history 写了一条，
+        // 这里不再写 localStorage、不再 pushEntryToServer，避免"自己查的一条 +
+        // 服务端自动写一条"在抽屉里重复显示。只刷新一下服务端缓存让抽屉立即看到。
+        if (_sync.isLocal) {
+            if (typeof refreshServerHistory === 'function') {
+                refreshServerHistory().then(() => renderHistory());
+            } else {
+                renderHistory();
+            }
+            return;
+        }
+        // LAN 模式（手机等）：仍写本地 localStorage（离线也能看自己的历史），
+        // 但不再 pushEntryToServer——服务端自动写过了，推了只会造成重复条目。
         let list = loadHistory();
         list = list.filter(h => JSON.stringify(h.packages) !== JSON.stringify(packageNames));
         list.unshift(entry);
         if (list.length > MAX_HISTORY) list = list.slice(0, MAX_HISTORY);
         saveHistoryList(list);
-        pushEntryToServer(entry);
-        renderHistory();
+        if (sharedHistoryEnabled && typeof refreshServerHistory === 'function') {
+            refreshServerHistory().then(() => renderHistory());
+        } else {
+            renderHistory();
+        }
     }
     function timeAgo(ts) {
         const d = Date.now() - ts;
@@ -752,9 +1046,13 @@
             } else {
                 drawerList.innerHTML = list.map((h, i) => {
                     const hasResults = h.results && h.results.length;
-                    const fromOther = h._from_server || (h.device_id && h.device_id !== MY_DEVICE_ID);
-                    const badge = fromOther
-                        ? `<span class="v4-hist-device-badge other" title="来自其它设备">${esc(h._device_name || h.device_name || '其他设备')}</span>`
+                    // 本机模式下所有条目都是用户自己（同一台机器多浏览器），badge 是噪声；
+                    // 只在 LAN 模式下才标"来自其它设备"——手机从 LAN 看电脑查的记录才有意义。
+                    const fromOther = !_sync.isLocal
+                        && (h._from_server || (h.device_id && h.device_id !== MY_DEVICE_ID));
+                    const deviceName = h._device_name || h.device_name || '';
+                    const badge = (fromOther && deviceName)
+                        ? `<span class="v4-hist-device-badge other" title="来自其它设备">${esc(deviceName)}</span>`
                         : '';
                     return `
                     <div class="v4-hist-item" data-hist-idx="${i}">
@@ -782,6 +1080,9 @@
 
     // 共享开关：默认关闭；开启时弹警告
     $('#chkSharedHistory').addEventListener('change', async (e) => {
+        // 本机模式下这个开关根本不该显示（CSS 已隐藏整条 #sharedHistoryBar）；
+        // 如果出现极端情况（data-access-mode 还没写上去就被点了），忽略并强制回 true
+        if (_sync.isLocal) { e.target.checked = true; return; }
         if (e.target.checked) {
             const ok = confirm(
                 '⚠ 开启"共享局域网历史"后：\n\n' +
@@ -941,6 +1242,14 @@
     async function triggerQuery() {
         const lines = parseLines(input.value);
         if (!lines.length) { input.focus(); return; }
+        // ⚠️ 不要删除这一行 blur —— 这里修的 bug 修了好多次。
+        // _collapseInputForResults() 里有一道 `if (document.activeElement === input) return`
+        // 护栏，目的是避免流式 progress 把用户正在编辑的多行压回一行。
+        // 但 Cmd/Ctrl+Enter 触发查询时 textarea 仍然带 focus，那道护栏会把"提交后的
+        // 多行→单行折叠"也跳过，导致结果页还是 3 行高的 textarea 占满空间。
+        // 这里显式 blur 让 activeElement 挪走，折叠才能正常执行。鼠标点 #btnQuery
+        // 时本来就会挪走 focus，所以无副作用。
+        input.blur();
         if (lines.length >= BATCH_WARN_THRESHOLD) {
             const ok = await batchWarn(lines.length);
             if (!ok) return;
@@ -974,8 +1283,13 @@
             get_sha1: filters.ext.has('sha1'),
             get_sha256: filters.ext.has('sha256'),
             query_interval_ms: getIntervalMs(lines.length),
-            platform_filter: filters.platform === 'ios' ? 'iOS'
-                           : filters.platform === 'android' ? 'Android' : 'all',
+            // 照抄 main-legacy.js:1203 —— 后端用小写 "all"/"ios"/"android" 比较
+            // （app.py:817/819/911/913/4685/4687）。V4 早期版本这里多写了一次大小写
+            // 转换成 "iOS"/"Android"，导致后端三条分支全部不命中：跨端补全被跳过
+            // (app.py:4675 只在 == "all" 时跑)，筛选 continue 也不触发 → 选 Android
+            // 反而出 iOS 的怪象。修复方式 = 直接透传 filters.platform（它本来就是小写）。
+            // 违反了 feedback_ui_only.md："数据逻辑/API 参数全部照抄老版"。
+            platform_filter: filters.platform,
             extended_search: filters.opts.has('extended'),
         };
         enterLoading(lines.length);
@@ -1105,19 +1419,15 @@
         // 先渲染一次骨架（表头 + 空 body），避免首次结果到达前工具栏悬空
         showResults();
         if (window._measureStickyHeights) window._measureStickyHeights();
-        // 轮播小贴士
+        // 轮播小贴士：启动"查询中"的 tip 节奏（6s 一条，点击立即切下一条）
         const tip = $('#toolbarTip');
         if (tip) {
             tip.hidden = false;
             tip.textContent = nextTip();
-            if (tipsTimer) clearInterval(tipsTimer);
-            tipsTimer = setInterval(() => {
-                tip.classList.add('fade');
-                setTimeout(() => {
-                    tip.textContent = nextTip();
-                    tip.classList.remove('fade');
-                }, 300);
-            }, 6000);
+            _tipsSource   = () => nextTip();
+            _tipsInterval = 6000;
+            _resetTipsTimer();
+            _bindTipClickOnce();
         }
     }
     function exitLoading() {
@@ -1129,25 +1439,80 @@
         _startResultsTips();
         if (bgBannerTimer) { clearTimeout(bgBannerTimer); bgBannerTimer = null; }
         $('#bgBanner').hidden = true;
+        // ⚠️ 这一行是"header 跑到数据下面"老 bug 的止血点之一（TIPS #13）。
+        // exitLoading 会隐藏 inlineProgress，toolbar 从查询中的高度缩回"无进度条"高度；
+        // 如果不重新测量，`--sticky-top-2` 仍是查询中那个较大值，thead 就会粘在
+        // 一个比实际 toolbar 更低的位置，中间空出 gap 让数据行从下面窜到 header 上方。
+        // 更根治的方案是给 .v4-tb 挂 ResizeObserver（见本文件下方的 _ro 定义）。
+        if (window._measureStickyHeights) window._measureStickyHeights();
     }
     function _startResultsTips() {
         const tip = $('#toolbarTip');
         if (!tip) return;
         tip.hidden = false;
-        if (!tip.textContent) tip.textContent = nextTip();
-        if (tipsTimer) clearInterval(tipsTimer);
-        tipsTimer = setInterval(() => {
-            tip.classList.add('fade');
-            setTimeout(() => {
-                tip.textContent = nextTip();
-                tip.classList.remove('fade');
-            }, 300);
-        }, 9000);  // 结果页比查询中慢一档（6s→9s），降低视觉干扰
+        // 结果页第一条：立即换成使用类 tip（别让查询中的冷笑话残留到结果页）
+        tip.textContent = nextUsageTip();
+        _tipsSource   = () => nextUsageTip();
+        _tipsInterval = 9000;   // 结果页比查询中慢一档（6s→9s），降低视觉干扰
+        _resetTipsTimer();
+        _bindTipClickOnce();
     }
     function _stopTips() {
         if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }
+        _tipsInterval = 0;      // 停止状态下，点击也不会自动恢复计时器
         const tip = $('#toolbarTip');
-        if (tip) { tip.hidden = true; tip.classList.remove('fade'); }
+        if (tip) {
+            tip.hidden = true;
+            tip.classList.remove('fade', 'tip-leave', 'tip-enter-init', 'tip-enter-active');
+        }
+    }
+    // ─── Tips 切换：上下滚动动画 + 点击立即换下一条 ─────────────────
+    // 设计：
+    //  · 切换分两段：旧 tip 向上滑出 150ms → 换文本 → 新 tip 从下滑入 150ms
+    //  · 两个轮播模式（查询中 6s / 结果页 9s）共用同一套动画与计时器
+    //  · 用户点击 tip → 立刻跑一次动画 + 重置自动计时器（避免点完马上被自动切走）
+    let _tipsSource   = null;    // () => string，当前阶段的下一条来源
+    let _tipsInterval = 9000;    // 自动轮播间隔（0 = 已停止）
+    let _tipSwapping  = false;   // 防止重入：一次动画进行中时忽略新触发
+    let _tipClickBound = false;
+    function _swapTip() {
+        const tipEl = $('#toolbarTip');
+        if (!tipEl || !_tipsSource || _tipSwapping) return;
+        _tipSwapping = true;
+        tipEl.classList.remove('tip-enter-init', 'tip-enter-active');
+        tipEl.classList.add('tip-leave');
+        setTimeout(() => {
+            tipEl.textContent = _tipsSource();
+            tipEl.classList.remove('tip-leave');
+            tipEl.classList.add('tip-enter-init');
+            // 双 rAF 保证浏览器应用 init 起点后再过渡到 active
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    tipEl.classList.remove('tip-enter-init');
+                    tipEl.classList.add('tip-enter-active');
+                    setTimeout(() => {
+                        tipEl.classList.remove('tip-enter-active');
+                        _tipSwapping = false;
+                    }, 160);
+                });
+            });
+        }, 150);
+    }
+    function _resetTipsTimer() {
+        if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }
+        if (!_tipsInterval) return;
+        tipsTimer = setInterval(_swapTip, _tipsInterval);
+    }
+    function _bindTipClickOnce() {
+        if (_tipClickBound) return;
+        const tipEl = $('#toolbarTip');
+        if (!tipEl) return;
+        tipEl.title = '点击看下一条';
+        tipEl.addEventListener('click', () => {
+            _swapTip();
+            _resetTipsTimer();   // 用户主动翻 → 重新计时，避免 1s 后被自动翻掉
+        });
+        _tipClickBound = true;
     }
     function updateProgress(done, total) {
         const t = total || 0;
@@ -1273,8 +1638,14 @@
                 // 点击 app 名即复制
                 return `<span class="v4-app-name copyable" data-copy="${esc(name)}" title="点击复制">${esc(name)}</span>${extBadge}`;
             }
-            case 'package_name':
-                return `<code class="mono v4-pkg">${esc(r.package_name || '')}</code>`;
+            case 'package_name': {
+                // 前缀手误自动修正（om./co./cm. → com.）时，在包名右侧挂一个
+                // 「已修正」badge，hover 显示用户原输入
+                const correctedBadge = r._corrected
+                    ? ` <span class="v4-corr-badge" title="您输入的「${esc(r._orig_value || '')}」可能前缀少字母，已为您自动修正为「${esc(r.package_name || '')}」">已修正</span>`
+                    : '';
+                return `<code class="mono v4-pkg">${esc(r.package_name || '')}</code>${correctedBadge}`;
+            }
             case 'platform': {
                 if (!r.platform) return '-';
                 const cls = r.platform === 'iOS' ? 'ios' : 'android';
@@ -1437,13 +1808,27 @@
                 : '';
             const sha1Html = r.sha1 ? `<div class="v4-card-row copyable mono" data-copy="${esc(r.sha1)}">SHA1: <span class="v4-trunc">${esc(r.sha1)}</span></div>` : '';
             const sha256Html = r.sha256 ? `<div class="v4-card-row copyable mono" data-copy="${esc(r.sha256)}">SHA256: <span class="v4-trunc">${esc(r.sha256)}</span></div>` : '';
+            // Bug F 修复：原来 app-name / 平台 / 分类 各自占一行 → 右侧大段留白，视觉浪费。
+            // 重新排版：
+            //   行 1：app-name (吃左侧) + platform/category 小标签 (推到右侧) —— justify-between
+            //   行 2：包名（单独一行，等宽 badge 样式）
+            //   行 3..N：商店链接 / SHA1 / SHA256（有才显示）
+            // 配合 style-v4.css 1635+ 的移动端 .v4-card 规则：padding:12 gap:12 align-items:flex-start
+            const platformChip = r.platform
+                ? `<span class="v4-card-chip v4-card-chip-${String(r.platform).toLowerCase()}">${esc(r.platform)}</span>`
+                : '';
+            const categoryChip = r.category
+                ? `<span class="v4-card-chip v4-card-chip-cat">${esc(r.category)}</span>`
+                : '';
             return `
             <div class="v4-card${r.incomplete ? ' incomplete' : ''}">
                 <div class="v4-card-icon">${r.icon_url ? `<img src="${esc(r.icon_url)}" />` : ''}</div>
                 <div class="v4-card-main">
-                    <div class="v4-card-name${r.app_name ? ' copyable' : ''}"${r.app_name ? ` data-copy="${esc(r.app_name)}" title="点击复制"` : ''}>${esc(r.app_name || '未找到')}</div>
+                    <div class="v4-card-title-row">
+                        <div class="v4-card-name${r.app_name ? ' copyable' : ''}"${r.app_name ? ` data-copy="${esc(r.app_name)}" title="点击复制"` : ''}>${esc(r.app_name || '未找到')}</div>
+                        <div class="v4-card-meta">${platformChip}${categoryChip}</div>
+                    </div>
                     <div class="v4-card-pkg mono copyable" data-copy="${esc(r.package_name || '')}">${esc(r.package_name || '')}</div>
-                    <div class="v4-card-row">${renderCell({key:'platform'}, r)} · ${esc(r.category || '-')}</div>
                     ${storeHtml || apkHtml ? `<div class="v4-card-row">${[storeHtml, apkHtml].filter(Boolean).join(' · ')}</div>` : ''}
                     ${sha1Html}
                     ${sha256Html}
@@ -1801,38 +2186,115 @@
     };
     const _ro = new ResizeObserver(() => window._measureStickyHeights());
     _ro.observe(document.querySelector('.v4-search-zone'));
+    // ⚠️ 同时观测 .v4-tb —— toolbar 高度在多种场景会变（inlineProgress 显隐、
+    // retryBadge 显隐、tip 长度变化换行、按钮 visibility 切换…），每一处都要
+    // 重新测 sticky 不然会出"thead 跑到数据下面"的老 bug（TIPS #13）。
+    // 挂 RO 后所有这些场景都自动收到，不再需要每处手动调 _measureStickyHeights。
+    const _tbEl = document.querySelector('.v4-tb');
+    if (_tbEl) _ro.observe(_tbEl);
     window.addEventListener('resize', window._measureStickyHeights);
 
-    /* ---------- Google 式折叠输入 ---------- */
+    /* ---------- Google 式折叠输入 ----------
+       核心规则（从用户视角出发）：
+       1) 提交搜索后：多行 → 折叠成一行（空格分隔）展示
+       2) 再次聚焦输入框 → 恢复多行，允许编辑
+       3) 用户编辑还没再次搜索时，任何情况下都不能丢失内容
+       4) 编辑结果和原搜索值不同时，下次聚焦也要基于"用户最新输入"恢复
+    */
+    // 工具：把一个多行原串压成"空格分隔"的折叠显示形式
+    const _toDisplayForm = (raw) => (raw || '')
+        .split(/\n+/).map(s => s.trim()).filter(Boolean).join(' ');
+
     window._collapseInputForResults = function() {
         if (!$('#v4Root').classList.contains('has-results')) return;
         // 用户正把光标放在输入框里审阅/编辑时，别强行折叠。
         // 否则流式 progress 触发的 showResults 会把刚展开的多行再压回一行，
         // 造成"立即点击没多行、等一会才出现"的诡异体验。
+        //
+        // ⚠️ 想动这个护栏前先读 triggerQuery() —— 那边在开始查询前显式 input.blur()，
+        // 就是为了让这里 activeElement !== input，让首次折叠能正常发生。
+        // 删这道护栏会让"用户在结果页点击输入框编辑时被流式 progress 跳回单行"那个
+        // 老 bug 回归；绕过这道护栏（在 triggerQuery 里 blur）是当前的正解。
         if (document.activeElement === input) return;
-        const raw = input.dataset.raw || input.value;
-        const lines = raw.split(/\n+/).map(s => s.trim()).filter(Boolean);
-        if (lines.length <= 1) return;
-        input.dataset.raw = lines.join('\n');
+
+        const currentVal = input.value;
+        const savedRaw   = input.dataset.raw || '';
+        const hasNewlines = currentVal.includes('\n');
+
+        // 决定权威内容（authoritative）：
+        //   A. 多行态（input 含换行）— 当前 input.value 就是最新，绝对用它
+        //   B. 单行态但 currentVal ≠ 已保存 raw 的折叠显示形式 — 用户改过，以 input.value 为准
+        //   C. 单行态且 currentVal === 折叠显示形式 — 还是上次搜索原值，用 savedRaw 还原行数
+        let authoritative;
+        if (hasNewlines) {
+            authoritative = currentVal;
+        } else if (savedRaw && currentVal.trim() === _toDisplayForm(savedRaw)) {
+            authoritative = savedRaw;
+        } else {
+            authoritative = currentVal;
+        }
+
+        const lines = authoritative.split(/\n+/).map(s => s.trim()).filter(Boolean);
+        // dataset.raw 永远跟随权威值更新 — 下次聚焦展开就是用户最新状态
+        if (lines.length >= 1) input.dataset.raw = lines.join('\n');
+        else delete input.dataset.raw;
+
+        if (lines.length <= 1) {
+            // 单行权威：如果当前显示是多行展开态，归一为纯单行；否则保持
+            if (hasNewlines) {
+                input.value = lines[0] || '';
+                input.style.height = '';
+            }
+            return;
+        }
+        // 多行权威：折叠显示为"空格分隔"一行
         input.value = lines.join(' ');
         input.style.height = '';
     };
+
     // 一次性展开为多行原值（抽出来让 focus 和 click 都能调用，避免仅靠
     // focus 事件时出现的时序漂移——click 在 mousedown→focus→click 链的任一
     // 节点都应尽快让用户看到原始多行）
     function _expandInputToMultilineIfAny() {
         if (!$('#v4Root').classList.contains('has-results')) return;
-        const raw = input.dataset.raw;
-        if (raw && !input.value.includes('\n')) {
-            input.value = raw;
+        // 已经在多行态：只重算高度，不碰 value
+        if (input.value.includes('\n')) {
             input.style.height = 'auto';
             input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+            return;
         }
+        const raw = input.dataset.raw || '';
+        if (!raw) return;
+        // 只在"当前单行显示 = 折叠显示形式"时才覆盖还原；
+        // 若用户已经把单行改成了别的内容（正在构思下一次查询），绝不覆盖
+        if (input.value.trim() === _toDisplayForm(raw)) {
+            input.value = raw;
+        }
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 160) + 'px';
     }
     input.addEventListener('focus', _expandInputToMultilineIfAny);
     // pointerdown/mousedown 比 focus 更早触发：用户手指一按就展开，不等 focus 链
     input.addEventListener('pointerdown', _expandInputToMultilineIfAny);
     input.addEventListener('click', _expandInputToMultilineIfAny);
+    // 用户输入时实时把"最新权威值"写进 dataset.raw，
+    // 这样任何后续时刻触发折叠/展开都能用上用户的真实状态，永远不丢内容。
+    input.addEventListener('input', () => {
+        if (!$('#v4Root').classList.contains('has-results')) return;
+        const val = input.value;
+        if (val.includes('\n')) {
+            const lines = val.split(/\n+/).map(s => s.trim()).filter(Boolean);
+            if (lines.length) input.dataset.raw = lines.join('\n');
+            else delete input.dataset.raw;
+        } else {
+            // 单行编辑：若内容已脱离原折叠显示，覆盖 dataset.raw（用户正写新查询）
+            const savedRaw = input.dataset.raw || '';
+            if (!savedRaw || val.trim() !== _toDisplayForm(savedRaw)) {
+                if (val.trim()) input.dataset.raw = val.trim();
+                else delete input.dataset.raw;
+            }
+        }
+    });
     input.addEventListener('blur', () => {
         setTimeout(() => {
             if (document.activeElement !== input) window._collapseInputForResults();
@@ -1843,5 +2305,8 @@
     setTimeout(() => input.focus(), 0);
     checkPendingJob();
     window._measureStickyHeights();
+    // 后台拉一次"访问模式 + 本机共享设置"，结果返回后可能异步覆盖主题 / 间隔。
+    // 故意不 await：让首屏用本地 localStorage 值秒级渲染，不卡白屏。
+    _bootstrapSync();
 
 })();

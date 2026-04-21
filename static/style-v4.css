@@ -532,32 +532,9 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   line-height: 22px;
   font-size: 14px;
 }
-/* 结果页搜索框统一使用首页样式（只在尺寸上收敛，视觉保持一致） */
-.v4-root.has-results .v4-searchbox {
-  border-radius: 24px;
-  box-shadow: var(--shadow-xs);
-  border-color: var(--border);
-}
-.v4-root.has-results .v4-searchbox:focus-within {
-  box-shadow: 0 1px 6px oklch(0.2 0.02 250 / 0.12), 0 0 0 4px var(--brand-soft);
-  border-color: var(--border-strong);
-}
-.v4-root.has-results .v4-advanced-popover { border-radius: 0 0 24px 24px; }
-.v4-root.has-results .v4-searchbox.adv-open {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.v4-root.has-results .v4-search-top {
-  padding: 10px 16px;
-  min-height: 44px;
-}
-.v4-root.has-results .v4-search-clear,
-.v4-root.has-results .v4-paste-btn,
-.v4-root.has-results .v4-adv-btn,
-.v4-root.has-results .v4-search-btn {
-  width: 32px; height: 32px;
-}
-.v4-root.has-results .v4-search-divider { height: 18px; }
+/* 结果页搜索框视觉样式 = 首页搜索框：
+   圆角 / 阴影 / 边框 / 内边距 / 分隔线 / 按钮尺寸全部沿用基础样式，
+   这里仅保留 布局 相关的差异（max-width、与 logo 并排等）。 */
 .v4-root.has-results .v4-search-inner {
   flex-direction: row;
   align-items: center;
@@ -573,7 +550,8 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 }
 .v4-root.has-results .v4-logo { font-size: 22px; letter-spacing: -0.5px; }
 .v4-root.has-results .v4-tagline { display: none; }
-.v4-root.has-results .v4-searchbox { flex: 1 1 auto; max-width: 516px; }
+/* 搜索框宽度与首页一致：640px 上限（= .v4-search-inner 基础 max-width） */
+.v4-root.has-results .v4-searchbox { flex: 1 1 auto; max-width: 640px; }
 .v4-root.has-results .v4-inline-history { display: none; }
 
 @media (max-width: 720px) {
@@ -629,11 +607,27 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-toolbar-tip {
   font-size: 12px; color: var(--text-tertiary);
   font-style: italic;
-  max-width: 380px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: opacity 0.3s;
+  /* ⚠ 历史坑（feedback_self_review 错 2）：原来用 flex:1 1 auto 吃满左组空白 → tip 一长就把
+     同行的 v4-tb-right 按钮挤到下一行 / 挤变形。正解：让 tip 在 .v4-tb-left 内独占最后一行。
+     .v4-tb-left 本身 flex-wrap:wrap，给 tip flex:0 0 100% + order:99 → tip 直接换到左组最底行，
+     title/count/meta 在上一行，右组 v4-tb-right 在另一行（父 .v4-tb 也是 wrap），永不被挤。 */
+  flex: 0 0 100%;
+  order: 99;
+  margin-top: 2px;
+  line-height: 1.45;
+  white-space: normal;
+  cursor: pointer;                 /* 提示可点击切下一条 */
+  user-select: none;
+  /* 默认过渡；切换时两段动画（leave / enter-active）共用 */
+  transition: transform 150ms ease, opacity 150ms ease;
 }
 .v4-toolbar-tip[hidden] { display: none; }
+.v4-toolbar-tip:hover { color: var(--text-secondary); }
+/* 上下滚动切换：旧 tip 向上滑出，新 tip 从下滑入 */
+.v4-toolbar-tip.tip-leave      { transform: translateY(-10px); opacity: 0; }
+.v4-toolbar-tip.tip-enter-init { transform: translateY(10px);  opacity: 0; transition: none; }
+.v4-toolbar-tip.tip-enter-active { transform: translateY(0);   opacity: 1; }
+/* 兼容旧的 .fade 类（如有残留） */
 .v4-toolbar-tip.fade { opacity: 0; }
 
 /* ===== Results (design v4-google) ===== */
@@ -659,7 +653,10 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   top: var(--sticky-top-1, 0px);
   z-index: 20;
 }
-.v4-tb-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* flex:1 1 0 + min-width:0 —— 让左组吃剩余空间、能收缩到 0；
+   长 tip 就在左组内部换行，不会把右侧按钮挤到下一行。
+   移动端 (≤720px) 由后面 media query 改成 width:100% + column，不受影响。 */
+.v4-tb-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1 1 0; min-width: 0; }
 .v4-tb-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .v4-tb-count {
   font-family: var(--font-mono, "JetBrains Mono", monospace);
@@ -670,7 +667,8 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-tb-meta { font-size: 12px; color: var(--text-tertiary); }
 .v4-tb-meta b { color: var(--text); font-weight: 600; }
 .v4-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-quaternary); display: inline-block; }
-.v4-tb-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* flex-shrink:0 保护右组：即使左组 tip 意外变长，右组也不会被压缩/挤换行。 */
+.v4-tb-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
 .v4-tb-div { width: 1px; height: 16px; background: var(--border); }
 
 /* Checkbox rows in toolbar */
@@ -723,18 +721,9 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   color: var(--text);
   letter-spacing: -0.1px;
 }
-.v4-app-name.copyable {
-  cursor: pointer;
-  transition: color 0.15s ease;
-}
-.v4-app-name.copyable:hover {
-  color: var(--brand);
-  text-decoration: underline;
-  text-decoration-color: oklch(from var(--brand) l c h / 0.4);
-  text-underline-offset: 3px;
-}
+/* app 名复制 hover 风格 = 包名风格：只变小手指针，无色彩 / 无下划线 */
+.v4-app-name.copyable { cursor: pointer; }
 .v4-card-name.copyable { cursor: pointer; }
-.v4-card-name.copyable:active { color: var(--brand); }
 /* iOS 无此项 / Android 无此项 —— 比空格/短横线更明确的"结构性空" */
 .v4-na {
   color: var(--text-quaternary);
@@ -753,6 +742,22 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   color: var(--text-secondary);
   background: var(--surface);
   border: 1px solid var(--border);
+  border-radius: 6px;
+  vertical-align: middle;
+  cursor: help;
+}
+/* 包名前缀自动修正（om./co./cm. → com.）的提示 badge，
+   暖黄色与 ext-badge 的中性灰区分，告诉用户「我动过你的输入」 */
+.v4-corr-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--warning, #8a6d1a);
+  background: var(--warning-soft, #fff4d4);
+  border: 1px solid var(--warning-border, #f0d58c);
   border-radius: 6px;
   vertical-align: middle;
   cursor: help;
@@ -1039,12 +1044,18 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 
 /* 移动端：搜索框的 query 按钮不被挤掉 */
 @media (max-width: 720px) {
-  .v4-searchbox { max-width: 100%; box-sizing: border-box; overflow: hidden; }
+  /* ⚠ 这里不能写 overflow:hidden（老坑 Bug B）：
+     .v4-advanced-popover 是 .v4-searchbox 内 position:absolute 向下伸出的子元素，
+     加 overflow:hidden 会把 popover 裁成 0 高 → 桌面窗口缩到 ≤720px 时点"高级"
+     按钮看不到展开的面板（用户亲证："点击无反应，扩大窗口才看到"）。
+     溢出控制改到 .v4-search-top（只管输入行），不影响 popover。 */
+  .v4-searchbox { max-width: 100%; box-sizing: border-box; }
   .v4-search-top {
     padding: 8px 10px; gap: 6px;
     min-width: 0; width: 100%;
     box-sizing: border-box;
     flex-wrap: nowrap;
+    overflow: hidden;
   }
   .v4-search-divider { display: none; }
   .v4-search-input {
@@ -1093,6 +1104,11 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-shared-toggle input { cursor: pointer; }
 .v4-shared-hint { color: var(--text-tertiary); font-size: 12px; }
 .v4-shared-hint a { color: var(--brand); text-decoration: none; }
+
+/* 本机（127/::1）访问时整条"共享局域网历史 + 设备名"都隐藏——
+   本机多浏览器永远共享一套，开关和设备身份都没意义。由 main-v4.js 的
+   _bootstrapSync() 把 <html data-access-mode="local"> 挂上去。 */
+html[data-access-mode="local"] #sharedHistoryBar { display: none; }
 .v4-shared-hint a:hover { text-decoration: underline; }
 .v4-hist-device-badge {
   display: inline-block;
@@ -1459,17 +1475,27 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   .v4-root { padding-top: env(safe-area-inset-top, 0); }
 
   /* --- top-right action icons: unified pill cluster with subtle container,
-         clear tap targets, never wraps, stays out of logo space --- */
+         clear tap targets, never wraps, stays out of logo space ---
+     ⚠ 移动端默认改成"流内靠右"（position:relative + align-self:flex-end），不再是 absolute！
+     老坑（Bug D）：position:absolute + top:8 在移动端下会导致：
+       a) 向下滑动时不跟着消失，视觉上"挡"住结果卡片
+       b) 占 viewport 右上角固定位置 → 搜索框视觉宽度缩水 → placeholder 被挤短
+     改成 relative 后：首屏自然在搜索区上方，滑动时跟着离场，不挡任何内容。
+     下面 .v4-root.has-results .v4-top-actions 原本特化窄屏结果页的 relative，
+     现在首屏也是 relative，那条规则等价保留即可（不重置 top/right 无副作用）。 */
   .v4-top-actions {
-    top: calc(env(safe-area-inset-top, 0) + 8px);
-    right: 8px;
+    position: relative;
+    top: auto;
+    right: auto;
+    margin: calc(env(safe-area-inset-top, 0) + 8px) 8px 0 auto;
+    align-self: flex-end;
+    max-width: fit-content;
     gap: 0;
     padding: 3px;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: 999px;
     box-shadow: var(--shadow-xs);
-    max-width: calc(100vw - 16px);
   }
   .v4-top-actions .v4-icon-btn {
     width: 34px; height: 34px;
@@ -1526,7 +1552,14 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   .v4-adv-btn svg,
   .v4-search-clear svg { width: 17px; height: 17px; }
 
-  /* --- advanced popover: keep fusion with searchbox on mobile --- */
+  /* --- advanced popover: keep fusion with searchbox on mobile ---
+     Bug E 修复：原本 4 row（平台/匹配/扩展/行为）label 宽度不一，chip 起点对不齐、
+     视觉混乱。改法：
+       1) label 给固定宽度 44px，所有 chip 区域左缘对齐
+       2) 每行 row 用 grid: [label 44px | chips 1fr] + column-gap 10
+       3) row 之间加细分隔线（除最后一行）
+       4) 面板 max-height 放宽到 420px 防 chip 多行溢出
+       5) 高级面板 chip 字号/行高微增，按压区 32px 更稳 */
   .v4-advanced-popover {
     left: -1px; right: -1px;
     padding: 0 12px;
@@ -1534,19 +1567,39 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   }
   .v4-advanced-popover.open {
     padding: 10px 12px 12px;
-    max-height: 320px;
+    max-height: 420px;
+    overflow-y: auto;
   }
-  .v4-adv-row { gap: 10px; min-height: auto; }
-  .v4-adv-group { gap: 8px; }
-  .v4-adv-label { font-size: 11.5px; gap: 4px; width: auto; }
+  .v4-adv-row {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    align-items: start;
+    gap: 4px 10px;
+    min-height: auto;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .v4-adv-row:last-of-type { border-bottom: 0; }
+  .v4-adv-group { gap: 8px; flex-wrap: wrap; }
+  .v4-adv-label {
+    font-size: 11.5px; gap: 4px;
+    width: 44px; min-width: 44px;
+    margin-top: 8px;                /* 与 chip 行视觉基线对齐 */
+    color: var(--text-tertiary);
+  }
   .v4-adv-label svg { width: 11px; height: 11px; }
-  .v4-adv-sep { display: none; }    /* separator loses sense when wrapping */
-  .v4-chip { height: 30px; padding: 0 12px; font-size: 12.5px; }
-  .v4-adv-hint { font-size: 10.5px; width: 100%; margin-top: 2px; }
+  .v4-adv-sep { display: none; }    /* separator loses sense in grid rows */
+  .v4-chip { height: 32px; padding: 0 14px; font-size: 13px; }
+  .v4-adv-hint {
+    font-size: 10.5px;
+    width: 100%; margin-top: 4px;
+    color: var(--text-quaternary);
+  }
   .v4-advanced-popover .v4-adv-reset {
-    top: 6px; right: 8px;
-    height: 22px; padding: 0 6px;
-    font-size: 11px;
+    position: static;                /* 在面板底部作为单独一行，不再绝对定位 */
+    margin: 4px auto 0;
+    height: 26px; padding: 0 14px;
+    font-size: 11.5px;
   }
 
   /* --- results page: compact header --- */
@@ -1559,15 +1612,23 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
     border-radius: 8px;
   }
   .v4-root.has-results .v4-tagline { display: none; }
-  .v4-root.has-results .v4-searchbox { max-width: 100%; border-radius: 16px; }
-  .v4-root.has-results .v4-search-top { min-height: 40px; padding: 6px 10px; }
-  .v4-root.has-results .v4-search-clear,
-  .v4-root.has-results .v4-paste-btn,
-  .v4-root.has-results .v4-adv-btn,
-  .v4-root.has-results .v4-search-btn { width: 32px; height: 32px; }
-  .v4-root.has-results .v4-search-btn { width: 36px; }
-  /* 结果页下，面板下圆角匹配 16px 搜索框 */
-  .v4-root.has-results .v4-advanced-popover { border-radius: 0 0 16px 16px; }
+  /* 移动端结果页搜索框视觉样式 = 首页（圆角 20 / 48px min-height / 38 按钮），
+     只保留布局所需的 max-width。 */
+  .v4-root.has-results .v4-searchbox { max-width: 100%; }
+
+  /* 移动端结果页 P0 修复 (TIPS #16)：
+     原 .v4-top-actions 是全页面 position:absolute 右上角，窄屏下会盖在 sticky 搜索框上，
+     把搜索按钮遮掉（iOS 手机 LAN 访问亲证）。窄屏结果页改成流内元素
+     （relative + margin-left:auto 靠右），第一屏在搜索框上方，向下滚动时消失——
+     用户想改主题/看历史时回顶部即可。pill 视觉样式（背景/边框/圆角）仍来自
+     line 1470-1489 的窄屏通用规则，不用重复写。 */
+  .v4-root.has-results .v4-top-actions {
+    position: relative;
+    top: auto; right: auto;
+    margin: 6px 8px 0 auto;
+    align-self: flex-end;
+    max-width: fit-content;
+  }
 
   /* --- toolbar: horizontal scroll, keep all buttons reachable --- */
   .v4-tb {
@@ -1588,16 +1649,13 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   .v4-tb-meta { font-size: 11.5px; }
   .v4-tb-right {
     width: 100%;
-    margin: 0 -10px;
-    padding: 0 10px 2px;
     gap: 6px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
+    /* 原本 flex-wrap:nowrap + overflow-x:auto 想让按钮横滑，但用户不知道能滑 →
+       以为蓝色主按钮"消失"（iOS 手机 LAN 访问亲证）。
+       改成 flex-wrap:wrap，所有按钮自动换行可见，工具栏高度随之变化。
+       右侧按钮原本 scroll-snap-align:start 作废（无横滑），行 1604 的规则失效但无害。 */
+    flex-wrap: wrap;
     justify-content: flex-start;
-    scroll-snap-type: x proximity;
   }
   .v4-tb-right::-webkit-scrollbar { display: none; }
   .v4-tb-right > * { flex-shrink: 0; scroll-snap-align: start; }
@@ -1618,7 +1676,9 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   }
   .v4-inline-bar { width: 100%; max-width: none; flex: 1 1 120px; }
 
-  /* --- results cards: stronger hierarchy, touch targets --- */
+  /* --- results cards: stronger hierarchy, touch targets ---
+     Bug F 重排：title-row 让 app-name 和 platform/category 分居两侧（justify-between），
+     充分利用卡片右侧原本留白的空间；包名独立一行 mono 底色展示，视觉层次更清晰。 */
   .v4-cards { padding: 10px; gap: 10px; }
   .v4-card {
     padding: 12px;
@@ -1627,8 +1687,26 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
     align-items: flex-start;
   }
   .v4-card-icon img { width: 48px; height: 48px; border-radius: 10px; }
-  .v4-card-main { display: flex; flex-direction: column; gap: 4px; }
-  .v4-card-name { font-size: 15px; line-height: 1.35; }
+  .v4-card-main { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+  /* Bug F: 标题行 = name 左、meta 右（平台 chip + 分类 chip） */
+  .v4-card-title-row {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 8px; flex-wrap: wrap;
+  }
+  .v4-card-name { font-size: 15px; line-height: 1.35; flex: 1; min-width: 0; }
+  .v4-card-meta { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+  .v4-card-chip {
+    display: inline-flex; align-items: center;
+    height: 20px; padding: 0 8px;
+    font-size: 10.5px; font-weight: 500;
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .v4-card-chip-ios { background: oklch(0.94 0.02 240); color: oklch(0.45 0.12 240); }
+  .v4-card-chip-android { background: oklch(0.94 0.04 145); color: oklch(0.42 0.12 145); }
+  .v4-card-chip-cat { color: var(--text-secondary); }
   .v4-card-pkg {
     font-family: var(--font-mono, monospace);
     font-size: 11.5px;

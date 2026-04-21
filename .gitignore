@@ -27,6 +27,7 @@ icon_src/app_icon.iconset/
 .history.json
 .jobs_cache.json
 .lan_settings.json
+.settings.json
 launchd.log
 *.log
 

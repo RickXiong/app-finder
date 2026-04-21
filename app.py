@@ -19,9 +19,10 @@ import zipfile
 import concurrent.futures
 import random
 import threading
+import queue  # TIPS #15: SSE 设置广播池用 queue.Queue（每个订阅者一个）
 import urllib.parse
 
-from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context, make_response
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.drawing.image import Image as XLImage
@@ -296,6 +297,37 @@ _HISTORY_MAX = 30           # 最多保留多少条
 _HISTORY_LOCK = threading.Lock()
 _HISTORY = []               # 内存中的列表，顺序：新 → 旧
 
+# 本机跨浏览器共享的用户设置：主题模式、查询间隔等；本机（127/::1）多浏览器共用一套。
+# LAN 访客（手机等）的设置仍在各自 localStorage 里，不走这里——避免手机改了主题
+# 把电脑的也改掉。只有 _is_local_request_ip 判定为本机的请求才能读写这份数据。
+# pending_job_* 不同步：那是绑浏览器 SSE 流的本地状态，跨浏览器同步反而出 bug。
+_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".settings.json")
+_SETTINGS_LOCK = threading.Lock()
+_SETTINGS = {}              # {"theme": "...", "interval_ms": 800, "updated_at": 1713700000, ...}
+
+# TIPS #15: SSE 设置广播池。api_settings_put 成功落盘后广播给所有活动订阅者（跳过 sender）
+# —— 让 B 浏览器不用刷新就能跟上 A 的改动。每订阅者 = 一个 queue.Queue，SSE generator 从 queue
+# 阻塞读。只对 _is_local_request_ip=true 的订阅开放（LAN 访客仍走各自 localStorage，不广播）。
+_SETTINGS_SUBSCRIBERS = []                        # [{'queue': queue.Queue, 'client_id': str}]
+_SETTINGS_SUBSCRIBERS_LOCK = threading.Lock()
+
+
+def _broadcast_settings(snapshot, sender_id=""):
+    """把最新的 settings snapshot 广播给所有活动的 SSE 订阅者。
+    sender_id 对应的那个订阅者跳过（避免自己 PUT 完被服务端 echo 回来重复应用，
+    用户选定的"不收"策略）。任何一个 subscriber queue 异常（断线/满）不影响其它。"""
+    with _SETTINGS_SUBSCRIBERS_LOCK:
+        subs = list(_SETTINGS_SUBSCRIBERS)
+    for sub in subs:
+        if sender_id and sub.get("client_id") == sender_id:
+            continue
+        try:
+            sub["queue"].put_nowait(snapshot)
+        except Exception:
+            # queue 满（默认 maxsize=32）= 客户端读不过来，丢弃本条。
+            # 下次 PUT 时会再广播最新值，客户端重连后靠 GET /api/settings 自我补齐。
+            pass
+
 
 def _load_lan_settings():
     """启动时从磁盘读取 LAN 开关设置 + 设备备注 + 黑名单"""
@@ -444,6 +476,28 @@ def _save_history():
         pass
 
 
+def _load_settings():
+    """启动时从磁盘读取本机共享设置；文件不存在或损坏都当空字典处理，前端首次改设置时会重建。"""
+    global _SETTINGS
+    try:
+        if os.path.exists(_SETTINGS_FILE):
+            with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    _SETTINGS = data
+    except Exception:
+        pass
+
+
+def _save_settings():
+    """把当前 _SETTINGS 落盘；失败不抛——极端情况下内存里也还在。"""
+    try:
+        with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_SETTINGS, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _server_side_save_history(raw_inputs, results):
     """服务端在查询完成时主动写一条历史。
     即使用户提前关了浏览器，只要后端跑完，历史记录就留下，不丢。
@@ -456,7 +510,7 @@ def _server_side_save_history(raw_inputs, results):
         for r in (results or [])[:60]:
             if not isinstance(r, dict):
                 continue
-            slim.append({
+            _slim = {
                 "package_name": r.get("package_name", ""),
                 "app_name": r.get("app_name", ""),
                 "platform": r.get("platform", ""),
@@ -464,7 +518,15 @@ def _server_side_save_history(raw_inputs, results):
                 "download_url": r.get("download_url", ""),
                 "category": r.get("category", ""),
                 "source": r.get("source", ""),
-            })
+            }
+            # 前端 badge / 完整度 / APK / SHA —— 历史回放也要还原，不然
+            # 点"显示"看到的结果缺了"补"/"已修正"/SHA 等信息，体验退化。
+            for k in ("extended_fill", "_corrected", "_orig_value",
+                      "_orig_task_type", "_notFound", "incomplete",
+                      "apk_direct_urls", "sha1", "sha256"):
+                if k in r and r[k] not in (None, "", False, []):
+                    _slim[k] = r[k]
+            slim.append(_slim)
         entry = {
             "timestamp": int(time.time() * 1000),
             "lines": lines,
@@ -473,11 +535,12 @@ def _server_side_save_history(raw_inputs, results):
             "saved_by": "server",  # 标记：服务端自动记录，非用户手动点击
         }
         with _HISTORY_LOCK:
-            # 去重：相同 lines + 5 秒窗内的只保留最新
-            now = entry["timestamp"]
+            # 去重：相同 lines 的老条目无条件剔除（不看时间窗），新条目顶到最前。
+            # 行为与老版本前端 saveToHistory 一致——同一条查询永远只保留最新一次。
+            # 旧版本这里只按"5 秒窗内"去重，导致用户隔一段时间再查同一个包名就
+            # 堆出一条重复记录，抽屉里看到同名条目好几行，体验不好。
             def _dup(h):
-                return (h.get("lines") == lines
-                        and abs((h.get("timestamp") or 0) - now) < 5000)
+                return h.get("lines") == lines
             _HISTORY[:] = [h for h in _HISTORY if not _dup(h)]
             _HISTORY.insert(0, entry)
             del _HISTORY[_HISTORY_MAX:]
@@ -733,7 +796,13 @@ def _job_worker(job_id):
                     rows = _make_fallback_rows(task_type, value, result)
 
                     # 跨端补全（和 /api/query 同一逻辑）
-                    if extended_search and platform_filter == "all":
+                    # ⚠ 不能再加 "platform_filter == all" 的门！
+                    # 用户心理模型：「筛 Android」= 「不管我输啥，给我 Android 的正确答案」。
+                    # 典型场景：用户输 iOS bundle `com.ss.iphone.ugc.aweme.lite`（其实是
+                    # 错把 iOS 当 Android），筛 Android。关门 → 0 结果，用户困惑。
+                    # 开门 → iOS 主查 → 反查出 Android 版抖音 lite → 平台过滤留 Android 行
+                    # → 附带 `_corrected`/`extended_fill` badge → 用户清楚"我们纠正过了"。
+                    if extended_search:
                         try:
                             rows = _extended_cross_fill(task_type, value, rows)
                         except Exception:
@@ -916,6 +985,26 @@ def clean_package_name(name):
     return name
 
 
+# ─── 包名前缀手误修正：om./co./cm. → com. ─────────────────────────
+# 场景：用户复制粘贴时手滑少了一个字母，比如
+#   om.ss.iphone.ugc.Aweme   (少 c)
+#   co.ss.iphone.ugc.Aweme   (少 m)
+#   cm.ss.iphone.ugc.Aweme   (少 o)
+# 这些都几乎不可能是真实的包名第一段。我们只针对"前缀少一个字母"做主动修正,
+# 中间/末尾缺漏不做（候选爆炸、假阳性多，靠名称反查更稳）。
+_PKG_PREFIX_TYPO_CANDIDATES = {"om", "co", "cm"}
+
+def _suggest_pkg_prefix_fix(pkg):
+    """返回可能的修正包名列表。没有修正建议时返回 []。
+    只对 `<om|co|cm>.xxx` 的包名返回 `[com.xxx]`。"""
+    if not pkg or "." not in pkg:
+        return []
+    first, rest = pkg.split(".", 1)
+    if first.lower() in _PKG_PREFIX_TYPO_CANDIDATES and len(first) == 2:
+        return ["com." + rest]
+    return []
+
+
 # ─── 用户常见复制粘贴场景的预清洗 ─────────────────────────────
 # 用户经常把 App Store/Play Store 的链接直接粘进来，或者手残带了斜杠、
 # 或者把 'id414478124' 直接当 iOS id 输入。这些都应在进入分流前先规整。
@@ -1092,23 +1181,39 @@ def _extended_cross_fill(task_type, value, rows):
             except Exception:
                 and_fill = None
             if and_fill and is_name_relevant(app_name, and_fill.get("app_name", "")):
-                # 搜狗/应用宝搜索只返回 pkg+name，category/icon 常为空——
-                # 拿到 pkg 后再回主流商店（小米/华为/豌豆荚/...）查一次包名，
-                # 把分类、图标、稳定商店链接补齐，让"补"行也是完整信息。
-                _enrich_crossfill_android(and_fill)
-                and_fill["source"] = (and_fill.get("source", "") + "+ext").strip("+") or "ext"
-                appended.append(_mark_incomplete({
-                    "package_name": and_fill.get("package_name", ""),
-                    "platform": "Android",
-                    "app_name": and_fill.get("app_name", ""),
-                    "download_url": and_fill.get("download_url", ""),
-                    "icon_url": and_fill.get("icon_url", ""),
-                    "category": and_fill.get("category", ""),
-                    "source": and_fill["source"],
-                    "_orig_task_type": task_type,
-                    "_orig_value": value,
-                    "extended_fill": True,  # 前端据此打 badge
-                }))
+                # 名字搜索（豌豆荚/搜狗）只返回 pkg + name，而且 source 受限于
+                # "支持服务端渲染的商店"，会导致用户看到 source=豌豆荚 / 搜狗应用
+                # ——和直接输安卓包名（走 xiaomi/tencent/... 优先级）得到的 source
+                # 不一致。用户困惑："抖音直接搜安卓包名是小米，iOS 反查却是豌豆荚?"
+                #
+                # 改法（用户明确指示）：拿到 pkg 之后，立刻跑一遍"按包名查询"流水线
+                # （小米优先），用它的结果作为权威行——source / category / icon /
+                # 下载链接都与直接输安卓包名完全一致。
+                pkg = (and_fill.get("package_name") or "").strip()
+                and_row = _run_pkg_query_for_crossfill(pkg) if pkg else None
+                if and_row is None:
+                    # pkg 查询彻底没命中（极少见，通常是网络故障）才降级到名字搜索
+                    # 拿到的 partial 数据
+                    and_row = {
+                        "package_name": and_fill.get("package_name", ""),
+                        "platform": "Android",
+                        "app_name": and_fill.get("app_name", ""),
+                        "download_url": and_fill.get("download_url", ""),
+                        "icon_url": and_fill.get("icon_url", ""),
+                        "category": and_fill.get("category", ""),
+                        "source": and_fill.get("source", ""),
+                    }
+                # 统一打 +ext 标记：表示这是跨端补全出来的行
+                and_row = dict(and_row)
+                and_row["source"] = (and_row.get("source", "") + "+ext").strip("+") or "ext"
+                and_row["_orig_task_type"] = task_type
+                and_row["_orig_value"] = value
+                and_row["extended_fill"] = True  # 前端据此打 badge
+                # 源端是前缀修正产物，补全出来的另一端也继承「已修正」标记，
+                # 不然只有 iOS 行打 badge、Android 行没有，容易让用户以为"只修了一半"
+                if ios_r.get("_corrected"):
+                    and_row["_corrected"] = True
+                appended.append(_mark_incomplete(and_row))
 
     # Android→iOS 补全
     if has_real_android and not has_real_ios:
@@ -1125,7 +1230,7 @@ def _extended_cross_fill(task_type, value, rows):
                 None
             )
             if ios_fill:
-                appended.append(_mark_incomplete({
+                _ios_row = {
                     "package_name": ios_fill.get("package_name", ""),
                     "platform": "iOS",
                     "app_name": ios_fill.get("app_name", ""),
@@ -1136,7 +1241,11 @@ def _extended_cross_fill(task_type, value, rows):
                     "_orig_task_type": task_type,
                     "_orig_value": value,
                     "extended_fill": True,
-                }))
+                }
+                # 源端（Android）若是前缀修正产物，补出来的 iOS 也继承「已修正」
+                if and_r.get("_corrected"):
+                    _ios_row["_corrected"] = True
+                appended.append(_mark_incomplete(_ios_row))
 
     if appended:
         # 剔除原先的 qimai 兜底行（那是「占位」，现在有真实补齐就不需要了）
@@ -1175,40 +1284,34 @@ def _search_android_by_name_single(name):
     return None
 
 
-def _enrich_crossfill_android(fill):
-    """对跨端补全得到的安卓行做二次丰富：如果 category / icon_url / 稳定下载页
-    缺失，按 pkg 并发跑一遍主流商店（xiaomi/tencent/wandoujia/...），
-    拿到的第一个非空字段补进去。
+def _run_pkg_query_for_crossfill(pkg):
+    """跨端补全专用：拿到反查出来的 Android 包名后，再用「按包名查询」流水线
+    完整跑一次——按 xiaomi / tencent / wandoujia / ... 优先级并发跑，按优先级
+    挑第一个真正命中（app_name 非空且不是"未找到"）的商店作为结果。
+    返回一个完整的 Android 行 dict，或 None（所有商店都没命中）。
 
-    背景：_search_android_by_name_single 只用 wandoujia + sogou 按名字搜，
-    sogou 命中率最高但只返回 pkg+name（没有 category/icon）。
-    场景：用户输 com.ss.iphone.ugc.Aweme (iOS) → 跨端补 Android
-    com.ss.android.ugc.aweme，但分类/图标空着——直接输 Android 包名时
-    却能拿到分类。两条路径结果不一致，用户会困惑。这里对齐到"直接查"。
+    为啥不直接复用顶层 query_single？因为 query_single 用的是全局 _QUERY_POOL，
+    如果批量场景下从该池的 worker 里再嵌套提交，有耗尽 worker 导致死锁的风险。
+    这里用独立小线程池（6 worker），和名称反查 / enrich 老逻辑同样模式。
+
+    这个函数替代了之前"先 name-search 拿 pkg，再 enrich 补 category/icon"的
+    两步拼接写法，让 iOS→Android 补全的结果与"直接输安卓包名"一条路径完全一致。
     """
-    if not fill:
-        return
-    pkg = (fill.get("package_name") or "").strip()
     if not pkg:
-        return
-    need_cat = not fill.get("category")
-    need_icon = not fill.get("icon_url")
-    # 下载链接是 APK 直链或空 → 当作"待补"
-    dl = fill.get("download_url") or ""
-    need_dl = (not dl) or _is_apk_direct_url(dl)
-    if not (need_cat or need_icon or need_dl):
-        return
-
-    # 跑一圈按用户优先级排好的商店（pkg 查询，单商店延时不高）
-    try:
-        order = get_ranked_store_order()
-    except Exception:
-        order = list(STORE_SEARCH_FUNCS.keys())
+        return None
+    # 这里故意不用 get_ranked_store_order()——统计排名会在每个商店积累 >=5 次
+    # 查询后按命中率/速度重排，可能把 appchina/豌豆荚 推到小米前面，导致
+    # cross-fill 的 source 变得不可预期（同一个包名今天显示小米、明天显示 appchina）。
+    # 直接用 DEFAULT_ANDROID_STORES 的固定顺序，永远小米优先，和用户对"安卓包名
+    # 查询"的心理预期一致。
+    order = list(DEFAULT_ANDROID_STORES)
     funcs = [(sid, STORE_SEARCH_FUNCS[sid]) for sid in order if sid in STORE_SEARCH_FUNCS]
     if not funcs:
-        return
+        return None
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(funcs))) as exe:
         futs = {sid: exe.submit(fn, pkg) for sid, fn in funcs}
+        # 按优先级顺序收集结果，遇到第一个真实命中就返回——
+        # 保证 source 与"直接输安卓包名"的逻辑一致（小米优先等）。
         for sid, f in futs.items():
             try:
                 r = f.result(timeout=HTTP_TIMEOUT + 1)
@@ -1216,14 +1319,19 @@ def _enrich_crossfill_android(fill):
                 continue
             if not r:
                 continue
-            if need_cat and r.get("category"):
-                fill["category"] = r["category"]; need_cat = False
-            if need_icon and r.get("icon_url"):
-                fill["icon_url"] = r["icon_url"]; need_icon = False
-            if need_dl and r.get("download_url") and not _is_apk_direct_url(r["download_url"]):
-                fill["download_url"] = r["download_url"]; need_dl = False
-            if not (need_cat or need_icon or need_dl):
-                break
+            app_name = (r.get("app_name") or "").strip()
+            if not app_name or app_name == "未找到":
+                continue
+            return {
+                "package_name": r.get("package_name", pkg),
+                "platform":     "Android",
+                "app_name":     app_name,
+                "download_url": r.get("download_url", ""),
+                "icon_url":     r.get("icon_url", ""),
+                "category":     r.get("category", ""),
+                "source":       r.get("source", sid),
+            }
+    return None
 
 
 def _make_fallback_rows(task_type, value, result):
@@ -1383,6 +1491,26 @@ def _mark_incomplete(row):
     return row
 
 
+# 国内商店常在 app 名里加"免费 / 极速 / HD / 专业版"等修饰词，iOS 版却不加——
+# 导致"七猫小说"(iOS) vs "七猫免费小说"(安卓豌豆荚) 这类双端名称差异。
+# 判断是否同一 app 时先把这些修饰词剥掉再比对。
+_APP_NAME_MODIFIERS_RE = re.compile(
+    r'(免费版|免费|极速版|极速|精简版|精简|青春版|国际版|专业版|企业版|'
+    r'标准版|完整版|官方版|公测版|测试版|内测版|HD版?|Lite版?|Pro版?|Plus版?)',
+    re.IGNORECASE
+)
+
+def _strip_app_name_modifiers(name):
+    """剥掉 app 名里的常见修饰词，返回"核心名"。仅在 is_name_relevant 做宽松比对时用，
+    不污染最终展示。比如 "七猫免费小说" → "七猫小说"、"抖音极速版" → "抖音"。"""
+    if not name:
+        return name
+    s = _APP_NAME_MODIFIERS_RE.sub('', name).strip()
+    # 清掉剥完后可能残留的空白/括号/连字符
+    s = re.sub(r'[\s\-·()（）]+', '', s)
+    return s or name  # 全是修饰词（罕见）时保底返回原名
+
+
 def is_name_relevant(search_term, app_name):
     """判断App名称是否与搜索词相关。
     规则：
@@ -1390,6 +1518,8 @@ def is_name_relevant(search_term, app_name):
     - 搜索词是 app 名的子串 → 相关（搜"斗地主"匹配"欢乐斗地主"）
     - app 名是搜索词的子串 → 看 app 名长度：中文≥2、英文≥4 才认为相关
       （避免"视频"/"QQ"这种通用短词误匹配任意含它的搜索词）
+    - 去掉"免费/极速/HD"等修饰词后满足以上任一 → 相关
+      （"七猫小说"(iOS) ≈ "七猫免费小说"(安卓)、"抖音" ≈ "抖音极速版"）
     """
     if not app_name or app_name == "未找到":
         return False
@@ -1397,15 +1527,32 @@ def is_name_relevant(search_term, app_name):
     a = app_name.lower().strip()
     if not s or not a:
         return False
+
+    def _cjk_len_ok(x):
+        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in x)
+        return len(x) >= (2 if has_cjk else 4)
+
+    # 原始字串的精确 / 子串匹配
     if s == a:
         return True
     if s in a:
         return True
-    if a in s:
-        # 是否含中文字符：中文短词信息量高（"微信"2字就足够），英文短词歧义大（"QQ"/"AI"）
-        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in a)
-        min_len = 2 if has_cjk else 4
-        return len(a) >= min_len
+    if a in s and _cjk_len_ok(a):
+        return True
+
+    # 剥修饰词后再来一轮——跨端命名差异的核心修复
+    s_core = _strip_app_name_modifiers(s)
+    a_core = _strip_app_name_modifiers(a)
+    if s_core and a_core and s_core != s and a_core != a:
+        # 只有至少一边真的剥掉了东西，这轮才有新信息
+        pass
+    if s_core and a_core:
+        if s_core == a_core:
+            return True
+        if s_core in a_core and _cjk_len_ok(s_core):
+            return True
+        if a_core in s_core and _cjk_len_ok(a_core):
+            return True
     return False
 
 
@@ -3135,8 +3282,10 @@ def search_bing_for_android_package(name, limit=5):
 
 
 
-def query_single(package_name, android_store_order=None, timeout_override=None):
-    """查询单个包名，返回结果列表。timeout_override 用于重查时延长超时。"""
+def query_single(package_name, android_store_order=None, timeout_override=None,
+                 _disable_prefix_fix=False):
+    """查询单个包名，返回结果列表。timeout_override 用于重查时延长超时。
+    _disable_prefix_fix: 内部参数，防止前缀修正递归。"""
     package_name = clean_package_name(package_name)
     _timeout = timeout_override or HTTP_TIMEOUT
     if not package_name:
@@ -3144,6 +3293,20 @@ def query_single(package_name, android_store_order=None, timeout_override=None):
 
     if android_store_order is None:
         android_store_order = get_ranked_store_order()
+
+    # ── 前缀手误修正：om./co./cm. → com. ──────────────────────────────
+    # 并发跑原始查询 + 修正后查询，原始查到了用原始、查不到用修正结果。
+    # 只对明确的前缀手误触发（_suggest_pkg_prefix_fix 内部筛选），命中比例低，
+    # 资源代价可接受。
+    _correction_future = None
+    _correction_candidate = None
+    if not _disable_prefix_fix:
+        _cands = _suggest_pkg_prefix_fix(package_name)
+        if _cands:
+            _correction_candidate = _cands[0]
+            _correction_future = _QUERY_POOL.submit(
+                query_single, _correction_candidate, android_store_order,
+                timeout_override, True)  # _disable_prefix_fix=True 防递归
 
     # ── 第1层：所有商店 + Apple 并发（复用共享线程池） ──────────────────
     # 注意：不再 new ThreadPoolExecutor，批量场景下省去 50 次池创建/销毁开销
@@ -3415,6 +3578,36 @@ def query_single(package_name, android_store_order=None, timeout_override=None):
             "source":       "qimai_hint",
         }))
 
+    # ── 前缀手误修正兜底：原始查询"等同没查到"时，改用修正版结果 ──────────
+    # 判定"等同没查到"：
+    #   ① app_name == "未找到"（qimai_hint 占位）
+    #   ② source ∈ {search_engine_ref, qimai_hint}（搜索引擎猜的名字，比如
+    #      `co.tencent.mm` 会被 sogou/360 猜成"安卓软件最全"这种站名）
+    # om./co./cm. 开头的包名 99% 是手误，所以只要修正版真查到了就用修正版。
+    if _correction_future is not None:
+        _GUESS_SOURCES = {"search_engine_ref", "qimai_hint"}
+        def _is_guess_or_placeholder(r):
+            if r.get("app_name") == "未找到":
+                return True
+            src = r.get("source", "")
+            if src in _GUESS_SOURCES:
+                return True
+            return False
+        def _is_all_guess(_rows):
+            if not _rows:
+                return True
+            return all(_is_guess_or_placeholder(r) for r in _rows)
+        try:
+            _corrected_rows = _correction_future.result(timeout=_timeout)
+        except Exception:
+            _corrected_rows = None
+        if _corrected_rows and not _is_all_guess(_corrected_rows) \
+                and _is_all_guess(rows):
+            for r in _corrected_rows:
+                r["_corrected"]  = True
+                r["_orig_value"] = package_name   # 用户原输入
+            return _corrected_rows
+
     return rows
 
 
@@ -3517,16 +3710,29 @@ def _asset_mtime(*relpaths):
     return str(latest or int(time.time()))
 
 
+def _html_no_store(resp):
+    """给 HTML 响应加 no-store，彻底禁掉浏览器对入口页的缓存。
+    HTML 本身很小（几十 KB），每次刷新重拉不费事；而一旦浏览器把入口页缓存下来，
+    页内引用的 /static/main-v4.js?v=<mtime> 的 v 参数就会被冻结在旧 mtime，
+    即使 JS 文件改了也拉不到新版本（Chrome/Safari 启发式缓存会持续分钟到小时不等，
+    这是"有时候刷不到新代码"的根因）。JS/CSS 本身继续用 ?v=mtime 版本号管理，
+    新版本号 = 新 URL，浏览器自动拉新——不需要在 /static/* 上也加 no-store。"""
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.route("/")
 def index():
-    v = _asset_mtime("static/main-v4.js", "static/style-v4.css", "templates/index.html")
-    return render_template("index.html", asset_v=v)
+    v = _asset_mtime("static/main-v4.js", "static/style-v4.css", "static/tips.js", "templates/index.html")
+    return _html_no_store(make_response(render_template("index.html", asset_v=v)))
 
 
 @app.route("/legacy")
 def index_legacy():
     v = _asset_mtime("static/main-legacy.js", "static/style-legacy.css", "templates/index-legacy.html")
-    return render_template("index-legacy.html", asset_v=v)
+    return _html_no_store(make_response(render_template("index-legacy.html", asset_v=v)))
 
 
 @app.route("/api/retry", methods=["POST"])
@@ -3829,9 +4035,15 @@ def api_history_add():
     if isinstance(results, list):
         entry["results"] = results[:60]  # 单条最多 60 个结果
     with _HISTORY_LOCK:
-        # 按时间戳去重（前端会带 timestamp）
-        ts = entry.get("timestamp")
-        _HISTORY[:] = [h for h in _HISTORY if h.get("timestamp") != ts]
+        # 按 lines 去重——和 _server_side_save_history 行为一致：同一条查询永远只
+        # 保留最新一次，不看时间窗。避免"同样的 packages 多次查询堆成多条"。
+        lines = entry.get("lines") or entry.get("packages") or []
+        if lines:
+            _HISTORY[:] = [h for h in _HISTORY
+                           if (h.get("lines") or h.get("packages") or []) != lines]
+        else:
+            ts = entry.get("timestamp")
+            _HISTORY[:] = [h for h in _HISTORY if h.get("timestamp") != ts]
         _HISTORY.insert(0, entry)
         del _HISTORY[_HISTORY_MAX:]
     _save_history()
@@ -3847,6 +4059,100 @@ def api_history_clear():
         _HISTORY.clear()
     _save_history()
     return jsonify({"ok": True})
+
+
+@app.route("/api/access_mode", methods=["GET"])
+def api_access_mode():
+    """告诉前端"你这次访问算本机还是 LAN 访客"。
+    前端自己靠 window.location.hostname 判不准——用户可能敲 localhost / 127 / 本机 LAN IP
+    三种入口打开，前两者是本机但 hostname 不同，第三种 hostname 像 LAN 但请求源其实是 127。
+    由服务端基于请求源 IP 判，是唯一可靠的方式。
+    本机模式下前端会打开"跨浏览器共享设置 + 永远共享历史"；LAN 模式保持旧逻辑。"""
+    is_local = _is_local_request_ip(request.remote_addr or "")
+    return jsonify({"is_local": bool(is_local)})
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    """拉取本机跨浏览器共享的设置（主题/间隔等）。仅本机可读。
+    LAN 访客不应该看到本机的偏好——返回 403 而不是空对象，前端据此决定"走本地 localStorage"。"""
+    if not _is_local_request_ip(request.remote_addr or ""):
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    with _SETTINGS_LOCK:
+        return jsonify({"ok": True, "settings": dict(_SETTINGS)})
+
+
+@app.route("/api/settings", methods=["PUT"])
+def api_settings_put():
+    """更新本机共享设置。body: {settings: {...}} 或直接是 {...}。
+    采用 merge（而非整体覆盖）：前端只推改动过的字段，老字段保留。这样多个浏览器
+    并发改不同字段不会互相清掉（A 改主题、B 改间隔可以共存）。同字段并发改走
+    last-write-wins，带 updated_at 时间戳。"""
+    if not _is_local_request_ip(request.remote_addr or ""):
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    payload = data.get("settings") if isinstance(data.get("settings"), dict) else data
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid payload"}), 400
+    # 白名单：只接受明确列出的字段，避免前端 bug 把 localStorage 里任意 key 都塞过来。
+    # 新增支持字段时在这里加一行即可。
+    # filters: V4 高级设置的 chip 状态 (platform/match/ext/opts)——TIPS #14。
+    # 值形如 {"platform":"all","match":"fuzzy","ext":["sha256"],"opts":["extended","keep"]}
+    ALLOWED = {"theme", "interval_ms", "advanced_open", "column_widths", "platform_filter", "filters"}
+    cleaned = {k: v for k, v in payload.items() if k in ALLOWED}
+    if not cleaned:
+        return jsonify({"ok": False, "error": "no allowed fields"}), 400
+    with _SETTINGS_LOCK:
+        _SETTINGS.update(cleaned)
+        _SETTINGS["updated_at"] = int(time.time())
+        snapshot = dict(_SETTINGS)
+    _save_settings()
+    # TIPS #15: 落盘成功后广播给其它浏览器（跳过 sender_id 对应的那个连接）
+    sender_id = request.headers.get("X-Client-Id", "") or ""
+    try:
+        _broadcast_settings(snapshot, sender_id)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "settings": snapshot})
+
+
+@app.route("/api/settings_stream", methods=["GET"])
+def api_settings_stream():
+    """SSE 流：本机浏览器订阅此端点，其它浏览器 PUT /api/settings 时，
+    服务端把最新 snapshot 推到这里（跳过 sender 的那个连接——"不收"策略）。
+    EventSource 默认自动重连，前端不用手动处理断线。
+    LAN 访客 403——他们的设置仍走各自 localStorage，不参与广播。"""
+    if not _is_local_request_ip(request.remote_addr or ""):
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    client_id = request.args.get("client_id", "") or request.headers.get("X-Client-Id", "") or ""
+    q = queue.Queue(maxsize=32)
+    sub = {"queue": q, "client_id": client_id}
+    with _SETTINGS_SUBSCRIBERS_LOCK:
+        _SETTINGS_SUBSCRIBERS.append(sub)
+
+    def generate():
+        try:
+            # 初始 comment：某些代理会等第一个 byte 才返回响应头，先打一个
+            yield ": connected\n\n"
+            while True:
+                try:
+                    snapshot = q.get(timeout=20)
+                    yield f"event: settings\ndata: {json.dumps(snapshot)}\n\n"
+                except queue.Empty:
+                    # 心跳：20s 一次，防止代理/浏览器 30s 超时关连接
+                    yield ": ping\n\n"
+        finally:
+            # 无论是 client 断线 / server 关闭 / generator 被回收，都清掉订阅。
+            with _SETTINGS_SUBSCRIBERS_LOCK:
+                try:
+                    _SETTINGS_SUBSCRIBERS.remove(sub)
+                except ValueError:
+                    pass
+
+    resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    resp.headers["Cache-Control"]     = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 @app.route("/api/about_info", methods=["GET"])
@@ -4370,9 +4676,12 @@ def api_query():
                     rows = _make_fallback_rows(task_type, value, result)
 
                     # ── 跨端补全（extended_search）──────────────────────────
-                    # 仅当用户没走平台筛选（filter=all）时才尝试补；筛选 iOS-only 或
-                    # Android-only 时反而强加对面的结果会让用户困惑。
-                    if extended_search and platform_filter == "all":
+                    # ⚠ 不要再给 platform_filter 加门！旧注释（"筛单平台时强加对面会困惑"）
+                    # 反了用户意图。真实场景：用户把 iOS bundle 误当成 Android 包名输入、
+                    # 筛选 Android —— 他要的就是"帮我纠正，给我 Android 版"。补回来的行
+                    # 自带 `_corrected`/`extended_fill` badge，前端会明示"这是纠正过的"。
+                    # 关掉这扇门 = 0 结果，用户抓狂。
+                    if extended_search:
                         try:
                             rows = _extended_cross_fill(task_type, value, rows)
                         except Exception:
@@ -4647,9 +4956,10 @@ if __name__ == "__main__":
     import webbrowser
     import threading
 
-    # 启动时加载持久化的 LAN 开关设置 + 共享历史
+    # 启动时加载持久化的 LAN 开关设置 + 共享历史 + 本机跨浏览器共享的用户设置
     _load_lan_settings()
     _load_history()
+    _load_settings()
 
     port = int(os.environ.get("PORT", 9527))
 
