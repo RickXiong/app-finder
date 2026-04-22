@@ -521,8 +521,14 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   background: var(--bg-elevated);
 }
 
-/* Collapse multi-line input to a single line while results shown + not focused */
-.v4-root.has-results .v4-search-input:not(:focus) {
+/* Collapse multi-line input to a single line while results shown + not being edited.
+   ⚠️ 用 .is-collapsed 而不是 :not(:focus)：原来靠 :focus 伪类有时序问题 —— pointerdown
+   里 JS 把 input.value 改成多行 + 读 scrollHeight 设 inline height，但那时 :focus 还没
+   激活（focus 事件在 pointerdown 之后），CSS `height:22px !important` 仍在强制压制，
+   导致 scrollHeight 读到 22px，inline height 算出来也是 22px。改用 JS 显式控制 class
+   加/减，时序完全可控：expand 函数一开头就 remove('is-collapsed')，高度才能被正确撑开。
+   collapse 函数结尾 add('is-collapsed') 把它压回单行。 */
+.v4-root.has-results .v4-search-input.is-collapsed {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -607,15 +613,18 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-toolbar-tip {
   font-size: 12px; color: var(--text-tertiary);
   font-style: italic;
-  /* ⚠ 历史坑（feedback_self_review 错 2）：原来用 flex:1 1 auto 吃满左组空白 → tip 一长就把
-     同行的 v4-tb-right 按钮挤到下一行 / 挤变形。正解：让 tip 在 .v4-tb-left 内独占最后一行。
-     .v4-tb-left 本身 flex-wrap:wrap，给 tip flex:0 0 100% + order:99 → tip 直接换到左组最底行，
-     title/count/meta 在上一行，右组 v4-tb-right 在另一行（父 .v4-tb 也是 wrap），永不被挤。 */
-  flex: 0 0 100%;
-  order: 99;
-  margin-top: 2px;
+  /* 按用户要求恢复：tip 跟 title/count/meta 同行显示，不单独占一行。
+     为了不挤到右组按钮：给 flex-shrink:1 + min-width:0 让它先被压缩；
+     超长部分用 text-overflow:ellipsis 直接省略（用户原话"太长的部分不要显示就好"）。
+     旧版曾踩过 tip 挤按钮的坑（feedback_self_review 错 2），所以右组 .v4-tb-right
+     有 flex-shrink:0 护栏不会被挤。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 780px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   line-height: 1.45;
-  white-space: normal;
   cursor: pointer;                 /* 提示可点击切下一条 */
   user-select: none;
   /* 默认过渡；切换时两段动画（leave / enter-active）共用 */

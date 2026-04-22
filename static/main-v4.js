@@ -2122,6 +2122,7 @@
                 input.dispatchEvent(new Event('input'));
             }
             currentJob = null;
+            input.classList.remove('is-collapsed');  // 取消返回首页态，清折叠样式
             $('#v4Root').classList.remove('has-results');
             $('#resultsZone').hidden = true;
             _stopTips();
@@ -2152,6 +2153,7 @@
         delete input.dataset.raw;
         input.dispatchEvent(new Event('input'));
         input.style.height = '';
+        input.classList.remove('is-collapsed');  // 回首页清状态，避免首页输入框残留折叠样式
         $('#v4Root').classList.remove('has-results', 'searched');
         $('#resultsZone').hidden = true;
         $('#bgBanner').hidden = true;
@@ -2245,11 +2247,14 @@
                 input.value = lines[0] || '';
                 input.style.height = '';
             }
+            // 单行态也加 is-collapsed，保证样式一致（22px 高、省略号）
+            input.classList.add('is-collapsed');
             return;
         }
-        // 多行权威：折叠显示为"空格分隔"一行
+        // 多行权威：折叠显示为"空格分隔"一行 + 打上 is-collapsed
         input.value = lines.join(' ');
         input.style.height = '';
+        input.classList.add('is-collapsed');
     };
 
     // 一次性展开为多行原值（抽出来让 focus 和 click 都能调用，避免仅靠
@@ -2257,6 +2262,9 @@
     // 节点都应尽快让用户看到原始多行）
     function _expandInputToMultilineIfAny() {
         if (!$('#v4Root').classList.contains('has-results')) return;
+        // ⚠ 时序关键：先 remove is-collapsed，CSS `height:22px !important` 才会失效，
+        // 后续 scrollHeight 才能读到真实多行高度。顺序反了会测到被压扁的 22px。
+        input.classList.remove('is-collapsed');
         // 已经在多行态：只重算高度，不碰 value
         if (input.value.includes('\n')) {
             input.style.height = 'auto';

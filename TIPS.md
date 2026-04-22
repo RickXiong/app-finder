@@ -30,6 +30,8 @@
 | 19 | `.v4-searchbox { overflow: hidden }` 把 absolute 定位的高级面板裁掉 | ✅ |
 | 20 | Homebrew python@3.12 默认不带 `_tkinter` → PyInstaller .app 启动时静默 import 失败、Flask 不起 | ✅ |
 | 21 | Werkzeug 3.x 启动反向 DNS 查询能慢 15-20s，smoke-test 必须用 poll-until-up 而非固定 sleep | ✅ |
+| 22 | Tip 独占行（#16 P0 的修法）用户不买账：要求恢复同行 + 省略号。#16 P0 已回滚 | ✅ |
+| 23 | `:not(:focus)` + JS scrollHeight 展开多行时序 bug：pointerdown 里读到的 scrollHeight 仍被 `!important` 压扁成 22px。改成 `.is-collapsed` 显式 class 门 | ✅ |
 
 ---
 
@@ -383,7 +385,7 @@ chip click 改的是这个 Set。刷新 → IIFE 重跑 → filters 重置为初
 
 **P0 - 窄屏 placeholder 截断**：textarea 单行时长文案被 Safari/iOS 硬裁。修法：按 viewport 宽度动态换短版文案（`PH_DESKTOP` / `PH_MOBILE`），`_applyPlaceholder()` 在 DOMContentLoaded + resize 时跑。
 
-**P0 - 结果页工具栏右侧按钮被 tip 挤到第二行**：`.v4-toolbar-tip { flex:1 1 auto; max-width:780px }` 原来想吃满剩余空白，但父 `.v4-tb-left { flex-wrap:wrap }` + `.v4-tb-right` 没 shrink-0 → tip 一长就挤垮右组。修法：`.v4-toolbar-tip { flex:0 0 100%; order:99 }` 让 tip 在左组内强制独占最后一行；`.v4-tb-right { flex-shrink:0 }` 加护栏。
+**P0 - 结果页工具栏右侧按钮被 tip 挤到第二行**：`.v4-toolbar-tip { flex:1 1 auto; max-width:780px }` 原来想吃满剩余空白，但父 `.v4-tb-left { flex-wrap:wrap }` + `.v4-tb-right` 没 shrink-0 → tip 一长就挤垮右组。~~修法：`.v4-toolbar-tip { flex:0 0 100%; order:99 }` 让 tip 在左组内强制独占最后一行。~~ **⚠ 2026-04-22 回滚**：用户觉得 tip 独占一行"太占空间"，要求回到同行显示、太长就省略。正解见 #22。`.v4-tb-right { flex-shrink:0 }` 护栏保留。
 
 **P0 - 移动端右上角 icon pill 挡结果**：`.v4-top-actions` 移动端默认 `position:absolute`，向下滑时不跟着消失，视觉上"盖"在结果上。修法：移动端默认改 `position:relative + align-self:flex-end + margin-left:auto` 流内靠右——滑动时跟随离场。
 
@@ -496,6 +498,75 @@ done
 **修法（产品侧）**：暂不处理。用户首次遇到 "连接失败" 页面，F5 刷新一次就能正常进。正经修要 monkey-patch werkzeug 或迁到 waitress/gunicorn，成本大收益小，先留坑。
 
 **教训**："日志停在某一行" ≠ "进程挂了"。拿 `sample <pid>` 抓栈 5 秒，看是不是卡在某个具体的 syscall（gethostbyaddr / bind / accept），比瞎猜省时。
+
+---
+
+## #22 Tip 独占行（#16 P0 的修法）用户不买账：改回同行 + 省略号 ✅
+
+**场景**：v1.2.0 发出去给用户装，用户反馈"tips 不要单独一行，恢复到之前的样子，太长的部分不要显示就好"。#16 P0 把 tip 做成独占工具栏最底下一行（`flex:0 0 100%; order:99`），用户觉得"太占结果页空间 / 视觉分量太重"。
+
+**根因**：#16 P0 原本是为了修"tip 长文案挤垮右组按钮"，上一版修法选择把 tip 挤出去（独占一行、让开按钮）。但这改变了用户对"工具栏是一行"的期待，而且挤按钮的根因其实是右组 `.v4-tb-right` 没加 `flex-shrink:0`。只要右组不可挤 + tip 自己会省略号，就能既不挤按钮又保持一行。
+
+**修法**：
+```css
+.v4-toolbar-tip {
+  flex: 0 1 auto;      /* 允许被压缩（#16 P0 是 0 0 100% 独占一行） */
+  min-width: 0;
+  max-width: 780px;
+  white-space: nowrap; /* #16 P0 原来改成 normal；现在必须 nowrap 才能跟 ellipsis 配 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* order:99 也删掉，回到默认视觉顺序 */
+}
+.v4-tb-right { flex-shrink: 0; }  /* 护栏保留：tip 被压到 0 宽也不会挤按钮 */
+```
+
+**教训**：处理"A 挤 B"时有两种修法——让 A 独占一行（换行避让） or 让 A 可被压缩 + ellipsis（就地缩小）。前者破坏视觉层次，后者保持一行但"信息看不全"。正确选择要看用户对"完整展示 tip"和"保持一行"哪个优先。**这次选错了默认，下次 tip 这种次要信息优先就地压缩。**
+
+**代码位置**：`static/style-v4.css:607` 附近 `.v4-toolbar-tip`。
+
+---
+
+## #23 `:not(:focus)` + JS scrollHeight 展开多行时序 bug：readScrollHeight 被 `!important` 压扁 ✅
+
+**场景**：用户在结果页点搜索框想继续编辑，发现输入框依然是单行——多行内容 `dataset.raw` 还在，但 `input.value` 被改回多行后视觉上仍是 22px 高。
+
+**根因（深坑）**：原实现 CSS 用 `:not(:focus)` 做折叠门：
+```css
+.v4-root.has-results .v4-search-input:not(:focus) {
+  height: 22px !important; white-space: nowrap; ...
+}
+```
+JS 在 `pointerdown`（focus **之前**就触发）里做展开：
+```js
+input.value = raw;                          // 写回多行值
+input.style.height = 'auto';                 // 想让 scrollHeight 重测
+input.style.height = Math.min(scrollHeight, 160) + 'px';
+```
+**问题**：pointerdown 那一刻 `:focus` 还没激活，CSS `height:22px !important` 还在强制压制 textarea。`input.style.height = 'auto'` 是 inline style，**斗不过 `!important`**——browser 计算高度仍是 22px，`scrollHeight` 读出来也是 22px 左右（textarea 里的真实多行内容被 overflow:hidden 截没了）。于是 inline 设回 `22px`，focus 事件后 CSS `:not(:focus)` 虽然失效，但 inline `22px` 已经固化 → 输入框死活不展开。
+
+**修法**：放弃 `:not(:focus)` 这道 CSS 门，改用 JS 显式加/减 `.is-collapsed` class：
+```css
+.v4-root.has-results .v4-search-input.is-collapsed {
+  height: 22px !important; white-space: nowrap; ...
+}
+```
+```js
+function _expandInputToMultilineIfAny() {
+  input.classList.remove('is-collapsed');   // ⚠ 必须第一步：解开 !important 束缚
+  if (input.value.includes('\n')) { /* 重测高度 */ return; }
+  if (input.value.trim() === _toDisplayForm(raw)) input.value = raw;
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+}
+```
+时序完全由 JS 控制：先摘帽、再读 scrollHeight。collapse 函数收尾统一 `classList.add('is-collapsed')` 把帽重新戴上。
+
+**教训**：**用 `:not(:focus)` / `:focus` 做 CSS 门 + JS 依赖 scrollHeight 的组合是个坑**——`:focus` 是浏览器事件链里的"后半节"，JS 在 pointerdown/mousedown 已经要读测量，`!important` 和 inline style 谁赢取决于"此刻 :focus 是否激活"这种飘忽的状态。改成 JS 控制的显式 class，时序可读可控。
+
+遇到类似 pattern（CSS 伪类门 + JS 测量/写入）先问一句：**"读测量的那一刻，伪类是否已经切到期望状态？"** 答案是"不一定/有时"就换 class 门。
+
+**代码位置**：`static/style-v4.css:525` `.v4-root.has-results .v4-search-input.is-collapsed` + `static/main-v4.js:2208, 2258` 的 collapse/expand 函数。
 
 ---
 
