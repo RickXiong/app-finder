@@ -613,12 +613,15 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-toolbar-tip {
   font-size: 12px; color: var(--text-tertiary);
   font-style: italic;
-  /* 按用户要求恢复：tip 跟 title/count/meta 同行显示，不单独占一行。
-     为了不挤到右组按钮：给 flex-shrink:1 + min-width:0 让它先被压缩；
-     超长部分用 text-overflow:ellipsis 直接省略（用户原话"太长的部分不要显示就好"）。
-     旧版曾踩过 tip 挤按钮的坑（feedback_self_review 错 2），所以右组 .v4-tb-right
-     有 flex-shrink:0 护栏不会被挤。 */
-  flex: 0 1 auto;
+  /* ⚠ 这里踩过两次坑，完整记录一下防止第 3 次：
+     - 第 1 次：`flex:1 1 auto + max-width:780` → tip 一长就吃满空白，挤垮右组按钮到下一行。
+     - 第 2 次（v1.2.0 把它搞成独占行）：用户说不要独占行，改成 `flex:0 1 auto + max-width:780`
+       + ellipsis。但 .v4-tb-left 自己 `flex-wrap:wrap`，tip 长到 780 就在左组内换到第二行
+       （看着像回到"独占行"），ellipsis 根本没生效。
+     - 正解（这次）：`flex:1 1 0` —— basis=0 让 tip 永远不触发 wrap；有剩余空间就长大到
+       max-width 780；title/count/meta 先排好，tip 吃余量；空间不够时 flex-shrink 压到 0，
+       全靠 ellipsis 展示。这样 tip / title / 右组永远在同一行，也不会互相挤。 */
+  flex: 1 1 0;
   min-width: 0;
   max-width: 780px;
   white-space: nowrap;

@@ -30,7 +30,7 @@
 | 19 | `.v4-searchbox { overflow: hidden }` 把 absolute 定位的高级面板裁掉 | ✅ |
 | 20 | Homebrew python@3.12 默认不带 `_tkinter` → PyInstaller .app 启动时静默 import 失败、Flask 不起 | ✅ |
 | 21 | Werkzeug 3.x 启动反向 DNS 查询能慢 15-20s，smoke-test 必须用 poll-until-up 而非固定 sleep | ✅ |
-| 22 | Tip 独占行（#16 P0 的修法）用户不买账：要求恢复同行 + 省略号。#16 P0 已回滚 | ✅ |
+| 22 | Tip 布局连续第 3 次修：`flex:1 1 0` 才是正解（前两次：`flex:1 1 auto` 挤右组 / `flex:0 0 100%` 独占行被吐槽 / `flex:0 1 auto + max-width:780` 在 wrap 父里又换行） | ✅ |
 | 23 | `:not(:focus)` + JS scrollHeight 展开多行时序 bug：pointerdown 里读到的 scrollHeight 仍被 `!important` 压扁成 22px。改成 `.is-collapsed` 显式 class 门 | ✅ |
 
 ---
@@ -501,27 +501,54 @@ done
 
 ---
 
-## #22 Tip 独占行（#16 P0 的修法）用户不买账：改回同行 + 省略号 ✅
+## #22 Tip 布局坑：连续修了 3 次才找到正解（`flex:1 1 0`） ✅
 
-**场景**：v1.2.0 发出去给用户装，用户反馈"tips 不要单独一行，恢复到之前的样子，太长的部分不要显示就好"。#16 P0 把 tip 做成独占工具栏最底下一行（`flex:0 0 100%; order:99`），用户觉得"太占结果页空间 / 视觉分量太重"。
+这是一个 **"同一个 CSS 属性三次改法都有问题"** 的教科书案例——每次都看着修好了，下次总有新场景让它漏。记录完整三次让后人不用重走这条路。
 
-**根因**：#16 P0 原本是为了修"tip 长文案挤垮右组按钮"，上一版修法选择把 tip 挤出去（独占一行、让开按钮）。但这改变了用户对"工具栏是一行"的期待，而且挤按钮的根因其实是右组 `.v4-tb-right` 没加 `flex-shrink:0`。只要右组不可挤 + tip 自己会省略号，就能既不挤按钮又保持一行。
+### 三次错的修法
 
-**修法**：
+**第 1 次（原始）：`flex: 1 1 auto; max-width: 780px`**
+- 症状：tip 长文案 → flex-grow 吃满剩余空白 → 780px 宽 → 挤垮右组按钮到下一行。
+
+**第 2 次（#16 P0 的修法）：`flex: 0 0 100%; order: 99; white-space: normal`**
+- 当时用 `.v4-tb-left { flex-wrap:wrap }` + 让 tip 独占左组最底下一行。物理上不挤按钮了，但 **改变了视觉层次**——用户感觉"tip 自己占一行好重"。
+- 用户吐槽："tips 不要单独一行，恢复到之前的样子，太长的部分不要显示就好"。
+
+**第 3 次（回滚重写）：`flex: 0 1 auto; max-width: 780px; white-space: nowrap; text-overflow: ellipsis`**
+- 意图：让 tip 可缩（flex-shrink:1）+ 单行省略号。看着 CSS 都对。
+- **但 `.v4-tb-left` 还是 `flex-wrap: wrap`**——tip 想占 780 宽，左组里 title+count 先占了 100 左右，剩下空间不够 780，flex 容器在 wrap 模式下 **不会 shrink，而是 wrap 到第二行**。ellipsis 根本没机会生效。
+- 症状：和第 2 次肉眼一样——tip 换到第二行（只不过这次是被 wrap 挤的，不是 `flex:0 0 100%` 明说的）。用户再次报 bug："tips 太长导致换行的你检查下是否还存在"。
+
+### 正解：`flex: 1 1 0; min-width: 0; max-width: 780px; nowrap + ellipsis`
+
 ```css
 .v4-toolbar-tip {
-  flex: 0 1 auto;      /* 允许被压缩（#16 P0 是 0 0 100% 独占一行） */
-  min-width: 0;
-  max-width: 780px;
-  white-space: nowrap; /* #16 P0 原来改成 normal；现在必须 nowrap 才能跟 ellipsis 配 */
+  flex: 1 1 0;           /* ⚠ basis=0 关键：tip 永远不在 wrap 容器里触发换行 */
+  min-width: 0;          /* 配合 basis=0 允许一路压到 0 宽 */
+  max-width: 780px;      /* 有空间时不要无限长 */
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* order:99 也删掉，回到默认视觉顺序 */
+  /* 不要 order:99 */
 }
-.v4-tb-right { flex-shrink: 0; }  /* 护栏保留：tip 被压到 0 宽也不会挤按钮 */
+.v4-tb-right { flex-shrink: 0; }  /* 护栏：tip 压到 0 也不会把按钮挤走 */
 ```
 
-**教训**：处理"A 挤 B"时有两种修法——让 A 独占一行（换行避让） or 让 A 可被压缩 + ellipsis（就地缩小）。前者破坏视觉层次，后者保持一行但"信息看不全"。正确选择要看用户对"完整展示 tip"和"保持一行"哪个优先。**这次选错了默认，下次 tip 这种次要信息优先就地压缩。**
+**为什么 `flex:1 1 0` 有效而 `flex:0 1 auto` 不行**：
+- `flex-basis: auto`（以前）= 用 content 的自然宽度当起点。tip 长文案自然宽 2000+px → 780 被 max-width 剪到 780 → 仍然超过可用空间 → wrap 到第二行。
+- `flex-basis: 0`（现在）= 起点就是 0，**从 0 开始抢余量**。永远不会"基础宽度"超过容器余量 → 不触发 wrap。flex-grow:1 让 tip 长到 max-width 780 或 title/count 吃剩的空间，取小。
+
+**测试矩阵**（viewport 宽度 × tip 长度 = 全部单行）：
+```
+1400px × 5字  → tbH=49, tipSameRowAsTitle ✓
+1400px × 92字 → tbH=49, tipW=716, ellipsis 生效 ✓
+ 900px × 92字 → tbH=49, tipW=216 ✓
+```
+
+**教训（3 条血的）**：
+1. **改 flex 子元素前必须同时看父容器的 `flex-wrap` 设置**。wrap 容器里 `flex-shrink:1` 是个假象——基础宽度超过余量时会先 wrap 再 shrink。
+2. **`flex:X X auto` 和 `flex:X X 0` 在 wrap 容器里行为天差地别**。想让元素可缩到 0、不触发换行，basis 必须 0（或很小的具体像素）。
+3. **重复踩同一个坑前一定要 grep 历史**——这个 tip 已经被修过两次，第三次动手前应该先 `git log --all -p static/style-v4.css | grep v4-toolbar-tip` 看历史修法，避免复制前两次的配方。
 
 **代码位置**：`static/style-v4.css:607` 附近 `.v4-toolbar-tip`。
 
