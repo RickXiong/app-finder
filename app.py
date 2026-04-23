@@ -603,6 +603,8 @@ def _parse_query_input(req_data):
     apk_url_mode        = req_data.get("apk_url_mode", "single")
     get_sha1            = bool(req_data.get("get_sha1", False))
     get_sha256          = bool(req_data.get("get_sha256", False))
+    # [E-介绍 2026-04-22] 新增：抓 App 介绍开关
+    get_description     = bool(req_data.get("get_description", False))
     platform_filter     = req_data.get("platform_filter", "all")
     query_interval_ms   = max(0, int(req_data.get("query_interval_ms", 0)))
     extended_search     = bool(req_data.get("extended_search", True))
@@ -638,26 +640,32 @@ def _parse_query_input(req_data):
         return out
 
     def dedup_ci(lst):
-        """不区分大小写去重，并统一小写返回。
-        安卓包名约定全小写（com.tencent.mm）；iTunes bundle id 查询也不分大小写。
+        """不区分大小写去重，但**保留原样**（供查询 API 使用）。
+        安卓包名约定全小写（com.tencent.mm）；Java 规范上包名本身区分大小写，
+        罕见情况（主要是企业应用）可能含大写段，强制 normalize 会导致查不到。
         用户从 Excel 粘贴常见 'COM.TENCENT.MM' 混写——
-        (1) 查询时 API 按小写匹配，避免查不到；
-        (2) 结果展示也落成 'com.tencent.mm' 符合惯例。"""
+        (1) 去重时大小写不敏感合并，避免同一条查两遍；
+        (2) **查询时用首次出现的原样**，避免罕见真·大写包名被误转小写查不到。
+        结果展示里商店返回啥就是啥（多数商店本来就返回小写）。"""
         seen, out = set(), []
         for x in lst:
             k = x.lower()
             if k not in seen:
-                seen.add(k); out.append(k)
+                seen.add(k); out.append(x)  # 原样，不 normalize 到小写
         return out
 
     def dedup_name(lst):
-        """应用名去重：对 latin 部分不区分大小写，同时折叠连续空白。
-        例：'微信 '  '微信'  'WeChat'  'wechat' → 只留前两条代表。"""
+        """应用名去重：对 latin 部分不区分大小写，折叠连续空白，并清理不可见字符。
+        例：'微信 '  '微信'  'WeChat'  'wechat' → 只留前两条代表。
+        场景：用户从网页/微信复制 App 名可能混入 U+200B 零宽、U+00A0 不间断空格、U+FEFF BOM 等，
+        不清理会导致肉眼看一样的两条视作两条，去重失败。正则与 clean_package_name 里的一致。"""
+        _INVIS = r'[\u200b\u200c\u200d\ufeff\u00a0\r\n\t\u2028\u2029\u200e\u200f\u202a-\u202e]'
         seen, out = set(), []
         for x in lst:
-            k = re.sub(r'\s+', ' ', x).strip().lower()
+            cleaned = re.sub(_INVIS, '', x)
+            k = re.sub(r'\s+', ' ', cleaned).strip().lower()
             if k and k not in seen:
-                seen.add(k); out.append(x)
+                seen.add(k); out.append(re.sub(r'\s+', ' ', cleaned).strip())
         return out
 
     cleaned_pkgs    = dedup_ci(pkg_list)
@@ -703,6 +711,7 @@ def _parse_query_input(req_data):
         "apk_url_mode":        apk_url_mode,
         "get_sha1":            get_sha1,
         "get_sha256":          get_sha256,
+        "get_description":     get_description,   # [E-介绍 2026-04-22]
         "platform_filter":     platform_filter,
         "extended_search":     extended_search,
         "raw_inputs":          list(raw_inputs or []),
@@ -737,6 +746,7 @@ def _job_worker(job_id):
     apk_url_mode        = wp['apk_url_mode']
     get_sha1            = wp['get_sha1']
     get_sha256          = wp['get_sha256']
+    get_description     = wp.get('get_description', False)   # [E-介绍 2026-04-22]
     platform_filter     = wp['platform_filter']
     extended_search     = wp.get('extended_search', True)
     raw_inputs_saved    = wp.get('raw_inputs', [])
@@ -768,20 +778,24 @@ def _job_worker(job_id):
                     max_workers=min(WORKERS, len(batch))) as exe:
                 future_map = {}
                 for task_type, value in batch:
+                    # [E-介绍 2026-04-22] get_description 同 sha1/sha256，要走 extended 路径
+                    need_ext = get_apk_url or get_sha1 or get_sha256 or get_description
                     if task_type == "pkg":
-                        if get_apk_url or get_sha1 or get_sha256:
+                        if need_ext:
                             f = exe.submit(query_single_extended, value,
                                            None, get_apk_url,
-                                           apk_url_mode, get_sha1, get_sha256)
+                                           apk_url_mode, get_sha1, get_sha256,
+                                           get_description)
                         else:
                             f = exe.submit(query_single, value)
                     elif task_type == "ios_id":
                         f = exe.submit(search_apple_by_numid, value)
                     else:
-                        if get_apk_url or get_sha1 or get_sha256:
+                        if need_ext:
                             f = exe.submit(query_by_name_extended, value,
                                            None, exact_search,
-                                           get_apk_url, apk_url_mode, get_sha1, get_sha256)
+                                           get_apk_url, apk_url_mode, get_sha1, get_sha256,
+                                           get_description)
                         else:
                             f = exe.submit(query_by_name, value, None, exact_search)
                     future_map[f] = (task_type, value)
@@ -871,11 +885,14 @@ def _job_worker(job_id):
 
                 def _retry_one(ttype, val):
                     try:
+                        # [E-介绍 2026-04-22] 重试分支也要支持 get_description
+                        need_ext = get_apk_url or get_sha1 or get_sha256 or get_description
                         if ttype == "pkg":
-                            if get_apk_url or get_sha1 or get_sha256:
+                            if need_ext:
                                 return query_single_extended(
                                     val, None, get_apk_url,
                                     apk_url_mode, get_sha1, get_sha256,
+                                    get_description,
                                     timeout_override=retry_timeout,
                                 ) or []
                             return query_single(val, timeout_override=retry_timeout) or []
@@ -883,10 +900,11 @@ def _job_worker(job_id):
                             r_one = search_apple_by_numid(val)
                             return [r_one] if r_one else []
                         # name
-                        if get_apk_url or get_sha1 or get_sha256:
+                        if need_ext:
                             return query_by_name_extended(
                                 val, None, exact_search,
-                                get_apk_url, apk_url_mode, get_sha1, get_sha256) or []
+                                get_apk_url, apk_url_mode, get_sha1, get_sha256,
+                                get_description) or []
                         return query_by_name(val, None, exact_search) or []
                     except Exception:
                         return []
@@ -1074,6 +1092,11 @@ def _names_related(a, b):
     场景：同一个包名在不同商店可能返回"豆包"/"豆包app"/"豆包-AI助手"——算相关；
     但如果商店把旧包配成了完全不同的 App（如 com.qiekj.user 返回"三国" vs 另一家"胖乖生活"），
     两个名字无字符重叠，就认定为不相关，避免 pick_best_name 误选短的那个。
+
+    【L-并联 2026-04-22】按用户反馈，这个函数在"字符集合重叠"基础上，
+    **并联** `is_name_relevant` 的"修饰词剥除"规则。任一通过即视为相关。
+    默认模糊模式下尽量宽松，让候选筛选也能捕到"七猫小说/七猫免费小说"这类
+    修饰词差异的同源 App。精准匹配 (exact_search) 不经过这里。
     """
     if not a or not b:
         return False
@@ -1088,9 +1111,27 @@ def _names_related(a, b):
         return {c for c in s if c.isalnum() or ('\u4e00' <= c <= '\u9fff')}
     sa, sb = _filter(sa), _filter(sb)
     if not sa or not sb:
+        # α 分支补充：字符集合全空时仍尝试修饰词剥除比对
+        a_core = _strip_app_name_modifiers(al)
+        b_core = _strip_app_name_modifiers(bl)
+        if a_core and b_core and (a_core == b_core or a_core in b_core or b_core in a_core):
+            return True
         return False
     overlap = len(sa & sb) / max(1, min(len(sa), len(sb)))
-    return overlap >= 0.5
+    if overlap >= 0.5:
+        return True
+    # [L-并联] α 规则补充：修饰词剥除后看相等/包含
+    # 例："抖音" vs "抖音极速版"：β 已能过（集合 100% 重叠）——此处无新增命中；
+    # 但像"七猫小说" vs "七猫免费小说极速版"：β 集合 {七,猫,小,说} ⊆ {七,猫,免,费,小,说,极,速,版}
+    #   重叠 = 4/4 = 100%，β 也能过；所以 α 分支在绝大多数场景是冗余安全网。
+    a_core = _strip_app_name_modifiers(al)
+    b_core = _strip_app_name_modifiers(bl)
+    if a_core and b_core:
+        if a_core == b_core:
+            return True
+        if a_core in b_core or b_core in a_core:
+            return True
+    return False
 
 
 def pick_best_name(names, primary=None):
@@ -1213,6 +1254,11 @@ def _extended_cross_fill(task_type, value, rows):
                 # 不然只有 iOS 行打 badge、Android 行没有，容易让用户以为"只修了一半"
                 if ios_r.get("_corrected"):
                     and_row["_corrected"] = True
+                # [H-介绍跨端回填 2026-04-22] 用户约定：只找到 iOS 的介绍，
+                # 就把 iOS 的介绍直接给 Android（是同一个 app）。如果 Android 侧
+                # 自己后续能抓到介绍，_enrich_rows 会优先用商店抓到的（更"地道"）。
+                if ios_r.get("description") and not and_row.get("description"):
+                    and_row["description"] = ios_r["description"]
                 appended.append(_mark_incomplete(and_row))
 
     # Android→iOS 补全
@@ -1241,6 +1287,9 @@ def _extended_cross_fill(task_type, value, rows):
                     "_orig_task_type": task_type,
                     "_orig_value": value,
                     "extended_fill": True,
+                    # [H-介绍跨端回填 2026-04-22] iOS 补全：iTunes 带回的 description
+                    # 直接继承到 _ios_row；Android 源端若已有介绍但 iOS 空，也做一次兜底
+                    "description": (ios_fill.get("description") or and_r.get("description") or "").strip(),
                 }
                 # 源端（Android）若是前缀修正产物，补出来的 iOS 也继承「已修正」
                 if and_r.get("_corrected"):
@@ -1553,6 +1602,21 @@ def is_name_relevant(search_term, app_name):
             return True
         if a_core in s_core and _cjk_len_ok(a_core):
             return True
+
+    # [L-并联 2026-04-22] β 规则补充：字符集合重叠 ≥50%
+    # 按用户反馈"两套规则并联，任一通过即相关"。
+    # 例："豆包" vs "豆包AI助手"：α 的包含关系已能过；
+    # 但像"闪电PDF阅读器" vs "PDF闪电阅读器 Pro"——两边子串都不包含另一个，
+    # α 判 False；β 的字符集合 {闪,电,p,d,f,阅,读,器} ∩ 几乎全集 = ≥50%，能过。
+    # 精准匹配 (exact_search) 不经过 is_name_relevant，无需担心放宽太多。
+    def _filter_set(x):
+        return {c for c in x if c.isalnum() or ('\u4e00' <= c <= '\u9fff')}
+    sa_set = _filter_set(a)
+    ss_set = _filter_set(s)
+    if sa_set and ss_set:
+        overlap = len(sa_set & ss_set) / max(1, min(len(sa_set), len(ss_set)))
+        if overlap >= 0.5:
+            return True
     return False
 
 
@@ -1578,6 +1642,8 @@ def search_apple_by_name(name, limit=3):
             icon_url = app_info.get("artworkUrl100", "") or app_info.get("artworkUrl60", "")
             genres = app_info.get("genres", [])
             category = genres[0] if genres else ""
+            # [E-介绍 2026-04-22] iTunes Search API 也返回 description，一起带上
+            description = (app_info.get("description", "") or "").strip()
             results.append({
                 "package_name": bundle_id,
                 "platform": "iOS",
@@ -1585,6 +1651,7 @@ def search_apple_by_name(name, limit=3):
                 "download_url": download_url,
                 "icon_url": icon_url,
                 "category": category,
+                "description": description,
             })
         return results
     except Exception:
@@ -2366,6 +2433,8 @@ def query_by_name(name, android_store_order=None, exact_search=False):
             "download_url": ios_r["download_url"],
             "icon_url": ios_r.get("icon_url", ""),
             "category": ios_r.get("category", ""),
+            # [E-介绍 2026-04-22] 带上 description（search_apple_by_name 已经塞进来）
+            "description": ios_r.get("description", ""),
         }))
         # 找配对安卓（严格名称匹配）
         for ar in all_android:
@@ -2568,12 +2637,16 @@ def search_apple(bundle_id):
             # iTunes API 直接提供分类
             genres = app_info.get("genres", [])
             category = genres[0] if genres else ""
+            # [E-介绍 2026-04-22] iTunes API 已经在这次 JSON 里返回 description，
+            # 白捡，不用再发一次请求。前端是否显示由 get_description 开关决定。
+            description = (app_info.get("description", "") or "").strip()
             return {
                 "source": "Apple App Store",
                 "app_name": app_name,
                 "download_url": download_url,
                 "icon_url": icon_url,
                 "category": category,
+                "description": description,
             }
     except Exception:
         pass
@@ -2598,6 +2671,8 @@ def search_apple_by_numid(app_id):
             genres = app_info.get("genres", [])
             category = genres[0] if genres else ""
             bundle_id = app_info.get("bundleId", app_id)
+            # [E-介绍 2026-04-22] 同 search_apple，直接捞 description
+            description = (app_info.get("description", "") or "").strip()
             return {
                 "package_name": bundle_id,
                 "platform": "iOS",
@@ -2605,6 +2680,7 @@ def search_apple_by_numid(app_id):
                 "download_url": download_url,
                 "icon_url": icon_url,
                 "category": category,
+                "description": description,
             }
     except Exception:
         pass
@@ -3565,6 +3641,9 @@ def query_single(package_name, android_store_order=None, timeout_override=None,
             "download_url": ios_result["download_url"],
             "icon_url": ios_result.get("icon_url", ""),
             "category": ios_result.get("category", ""),
+            # [E-介绍 2026-04-22] 漏了这一行——search_apple 早就返回 description，
+            # 但 query_single 这里按固定字段重组时没把它带上，导致 iOS 永远空介绍
+            "description": ios_result.get("description", ""),
         }))
 
     if not rows:
@@ -3611,8 +3690,130 @@ def query_single(package_name, android_store_order=None, timeout_override=None,
     return rows
 
 
-def _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256=False):
-    """为结果列表中的每个 Android 行补充 APK 直链、SHA1、SHA256。
+# ────────────────────────────────────────────────────────────
+# [E-介绍 2026-04-22] App 介绍抓取
+#
+# 规则（用户约定）：
+#   合格线 = 非空 AND 字符长度 > _DESC_MIN_LEN
+#   多源按优先级顺序看，**第一个满足合格线就停**；都不满足返回 ""
+#
+# 如果线上实测大量 App 都返回空（比如小众应用各商店介绍普遍 <50 字），
+# 可把 _DESC_MIN_LEN 调低，或切换成 "取最长" 兜底策略（代码末尾保留了注释模板）。
+# ────────────────────────────────────────────────────────────
+_DESC_MIN_LEN = 50
+
+def _fetch_desc_tencent(package_name):
+    """从应用宝 __NEXT_DATA__ JSON 抠介绍。字段名约定：description。"""
+    url = f"https://sj.qq.com/appdetail/{package_name}"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = _HTTP.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+        if resp.status_code != 200:
+            return ""
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text, re.S)
+        if not m:
+            return ""
+        nd = json.loads(m.group(1))
+        comps = (nd.get("props", {})
+                   .get("pageProps", {})
+                   .get("dynamicCardResponse", {})
+                   .get("data", {})
+                   .get("components", []))
+        for c in comps:
+            items = (c.get("data") or {}).get("itemData") or []
+            if not items:
+                continue
+            first = items[0] if isinstance(items[0], dict) else {}
+            if first.get("pkg_name") == package_name:
+                # 实测应用宝字段：description 最常见；兜底再试其他常见别名
+                return (first.get("description")
+                        or first.get("app_desc")
+                        or first.get("editor_intro")
+                        or first.get("app_introduction")
+                        or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_desc_xiaomi(package_name):
+    """从小米应用商店 details 页抠介绍。
+    小米页面 HTML 里介绍通常在 .pslide / .app-intro / [class*='intro'] 里。"""
+    url = f"https://app.mi.com/details?id={package_name}"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = _HTTP.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+        if resp.status_code != 200:
+            return ""
+        # 被重定向到首页 = 小米没这个 App
+        if "details?id=" not in (resp.url or ""):
+            return ""
+        soup = BeautifulSoup(resp.text, _BS_PARSER)
+        # 优先顺序：最专属的 class 在前
+        for sel in [".pslide", ".app-intro", ".app-desc", ".intro-content", "[class*='intro']", "[class*='desc']"]:
+            el = soup.select_one(sel)
+            if not el:
+                continue
+            text = el.get_text(separator="\n", strip=True)
+            if text and len(text) > 10:  # 过滤掉 "详情" 这种标签文字
+                return text
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_android_description(package_name):
+    """Android 多源并行取介绍。按优先级看第一个满足合格线（非空 AND >MIN）。
+
+    [E-介绍 2026-04-22] 并行后按"源优先级"而非"先到先得"选，
+    保证结果稳定：不管网络波动谁先返回，只要 Tencent 满足就用 Tencent。"""
+    if not package_name:
+        return ""
+    # 注意：这两个源都依赖 HTML/JSON 解析，商店改版时可能失效——失效时返回空串，不报错
+    sources = [
+        ("tencent", _fetch_desc_tencent),
+        ("xiaomi",  _fetch_desc_xiaomi),
+    ]
+    results = {}
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(sources)) as exe:
+            fut_map = {exe.submit(fn, package_name): name for name, fn in sources}
+            for fut in concurrent.futures.as_completed(fut_map, timeout=25):
+                name = fut_map[fut]
+                try:
+                    results[name] = (fut.result() or "").strip()
+                except Exception:
+                    results[name] = ""
+    except concurrent.futures.TimeoutError:
+        pass
+    # 按优先级顺序看合格线
+    for name, _ in sources:
+        txt = results.get(name, "")
+        if txt and len(txt) > _DESC_MIN_LEN:
+            return txt
+    # 严格合格线：都没达标就返回 ""（用户约定）
+    # 兜底方案（如果后续想放宽）：return max(results.values(), key=len, default="")
+    return ""
+
+
+def _fetch_description_for_row(row):
+    """根据行的 platform + package_name 抓介绍。
+    - iOS：search_apple 里已经塞了 description，直接用
+    - Android：多源并行抓
+    """
+    if row.get("description"):  # 已有就不重复抓
+        return row["description"]
+    platform = row.get("platform", "")
+    pkg = row.get("package_name", "")
+    if platform == "iOS":
+        return (row.get("description") or "").strip()
+    if platform == "Android" and pkg:
+        return _fetch_android_description(pkg)
+    return ""
+
+
+def _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256=False, get_description=False):
+    """为结果列表中的每个 Android 行补充 APK 直链、SHA1、SHA256、介绍。
     批量场景下并发查 appchina + wandoujia，不再逐条串行。"""
     need_appchina = get_apk_url or get_sha1 or get_sha256
     # 收集需要补齐的 Android pkg
@@ -3672,24 +3873,62 @@ def _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256=False):
             if get_sha256:
                 r["sha256"] = sha256
 
+    # [E-介绍 2026-04-22] 介绍抓取：iOS 已在 search_apple 里带回；Android 多源并行
+    if get_description:
+        # iOS 行：search_apple 已塞进 description；没塞的保持空
+        # Android 行：对还没有 description 且包名非空的，并行抓
+        android_need_desc = [r for r in rows
+                             if r.get("platform") == "Android"
+                             and r.get("package_name")
+                             and not r.get("description")]
+        if android_need_desc:
+            pkgs = list({r["package_name"] for r in android_need_desc})
+            desc_map = _parallel_map(_fetch_android_description, pkgs, timeout=30) or {}
+            for r in android_need_desc:
+                r["description"] = desc_map.get(r["package_name"]) or ""
+        # 同时清洗所有已有 description（去前后空白 + 不可见字符），保持行为一致
+        _INVIS = r'[\u200b\u200c\u200d\ufeff\u00a0\u2028\u2029\u200e\u200f\u202a-\u202e]'
+        for r in rows:
+            d = r.get("description") or ""
+            if d:
+                r["description"] = re.sub(_INVIS, '', d).strip()
+
+        # [H-介绍跨端回填 2026-04-22] 同一次查询里如果 iOS 有介绍但 Android 没有，
+        # 把 iOS 的介绍赋给 Android（用户约定："只找到 iOS 的就把 iOS 的也赋值给安卓"）；
+        # 反向同理。注意：只在"某一端完全空"时才覆盖，保持"双方各有 → 各用各"。
+        ios_desc = next((r["description"] for r in rows
+                         if r.get("platform") == "iOS" and r.get("description")), "")
+        and_desc = next((r["description"] for r in rows
+                         if r.get("platform") == "Android" and r.get("description")), "")
+        if ios_desc and not and_desc:
+            for r in rows:
+                if r.get("platform") == "Android" and not r.get("description"):
+                    r["description"] = ios_desc
+        elif and_desc and not ios_desc:
+            for r in rows:
+                if r.get("platform") == "iOS" and not r.get("description"):
+                    r["description"] = and_desc
+
     return rows
 
 
 def query_single_extended(package_name, android_store_order=None,
                           get_apk_url=False, apk_url_mode="single",
                           get_sha1=False, get_sha256=False,
+                          get_description=False,
                           timeout_override=None):
-    """查询单个包名，含可选的 APK 直链、SHA1、SHA256"""
+    """查询单个包名，含可选的 APK 直链、SHA1、SHA256、App 介绍"""
     rows = query_single(package_name, android_store_order, timeout_override=timeout_override)
-    return _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256)
+    return _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256, get_description)
 
 
 def query_by_name_extended(name, android_store_order=None, exact_search=False,
                            get_apk_url=False, apk_url_mode="single",
-                           get_sha1=False, get_sha256=False):
-    """按名称查询，含可选的 APK 直链、SHA1、SHA256"""
+                           get_sha1=False, get_sha256=False,
+                           get_description=False):
+    """按名称查询，含可选的 APK 直链、SHA1、SHA256、App 介绍"""
     rows = query_by_name(name, android_store_order, exact_search)
-    return _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256)
+    return _enrich_rows(rows, get_apk_url, apk_url_mode, get_sha1, get_sha256, get_description)
 
 
 # ========== 路由 ==========
@@ -4527,6 +4766,8 @@ def api_query():
     apk_url_mode = req_data.get("apk_url_mode", "single")   # "single" | "multiple"
     get_sha1     = bool(req_data.get("get_sha1", False))
     get_sha256   = bool(req_data.get("get_sha256", False))
+    # [E-介绍 2026-04-22] 介绍抓取开关
+    get_description = bool(req_data.get("get_description", False))
     platform_filter = req_data.get("platform_filter", "all")  # "all"|"ios"|"android"
     query_interval_ms = max(0, int(req_data.get("query_interval_ms", 0)))
     extended_search = bool(req_data.get("extended_search", True))  # 跨端补全：默认开
@@ -4565,26 +4806,32 @@ def api_query():
         return out
 
     def dedup_ci(lst):
-        """不区分大小写去重，并统一小写返回。
-        安卓包名约定全小写（com.tencent.mm）；iTunes bundle id 查询也不分大小写。
+        """不区分大小写去重，但**保留原样**（供查询 API 使用）。
+        安卓包名约定全小写（com.tencent.mm）；Java 规范上包名本身区分大小写，
+        罕见情况（主要是企业应用）可能含大写段，强制 normalize 会导致查不到。
         用户从 Excel 粘贴常见 'COM.TENCENT.MM' 混写——
-        (1) 查询时 API 按小写匹配，避免查不到；
-        (2) 结果展示也落成 'com.tencent.mm' 符合惯例。"""
+        (1) 去重时大小写不敏感合并，避免同一条查两遍；
+        (2) **查询时用首次出现的原样**，避免罕见真·大写包名被误转小写查不到。
+        结果展示里商店返回啥就是啥（多数商店本来就返回小写）。"""
         seen, out = set(), []
         for x in lst:
             k = x.lower()
             if k not in seen:
-                seen.add(k); out.append(k)
+                seen.add(k); out.append(x)  # 原样，不 normalize 到小写
         return out
 
     def dedup_name(lst):
-        """应用名去重：对 latin 部分不区分大小写，同时折叠连续空白。
-        例：'微信 '  '微信'  'WeChat'  'wechat' → 只留前两条代表。"""
+        """应用名去重：对 latin 部分不区分大小写，折叠连续空白，并清理不可见字符。
+        例：'微信 '  '微信'  'WeChat'  'wechat' → 只留前两条代表。
+        场景：用户从网页/微信复制 App 名可能混入 U+200B 零宽、U+00A0 不间断空格、U+FEFF BOM 等，
+        不清理会导致肉眼看一样的两条视作两条，去重失败。正则与 clean_package_name 里的一致。"""
+        _INVIS = r'[\u200b\u200c\u200d\ufeff\u00a0\r\n\t\u2028\u2029\u200e\u200f\u202a-\u202e]'
         seen, out = set(), []
         for x in lst:
-            k = re.sub(r'\s+', ' ', x).strip().lower()
+            cleaned = re.sub(_INVIS, '', x)
+            k = re.sub(r'\s+', ' ', cleaned).strip().lower()
             if k and k not in seen:
-                seen.add(k); out.append(x)
+                seen.add(k); out.append(re.sub(r'\s+', ' ', cleaned).strip())
         return out
 
     cleaned_pkgs    = dedup_ci(pkg_list)
@@ -4647,20 +4894,24 @@ def api_query():
                     max_workers=min(WORKERS, len(batch))) as exe:
                 future_map = {}
                 for task_type, value in batch:
+                    # [E-介绍 2026-04-22] get_description 同 sha1/sha256，要走 extended 路径
+                    need_ext = get_apk_url or get_sha1 or get_sha256 or get_description
                     if task_type == "pkg":
-                        if get_apk_url or get_sha1 or get_sha256:
+                        if need_ext:
                             f = exe.submit(query_single_extended, value,
                                            None, get_apk_url,
-                                           apk_url_mode, get_sha1, get_sha256)
+                                           apk_url_mode, get_sha1, get_sha256,
+                                           get_description)
                         else:
                             f = exe.submit(query_single, value)
                     elif task_type == "ios_id":
                         f = exe.submit(search_apple_by_numid, value)
                     else:
-                        if get_apk_url or get_sha1 or get_sha256:
+                        if need_ext:
                             f = exe.submit(query_by_name_extended, value,
                                            None, exact_search,
-                                           get_apk_url, apk_url_mode, get_sha1, get_sha256)
+                                           get_apk_url, apk_url_mode, get_sha1, get_sha256,
+                                           get_description)
                         else:
                             f = exe.submit(query_by_name, value, None, exact_search)
                     future_map[f] = (task_type, value)
@@ -4735,6 +4986,8 @@ def api_download():
     has_apk_urls = any(r.get("apk_direct_urls") for r in results)
     has_sha1     = any(r.get("sha1") for r in results)
     has_sha256   = any(r.get("sha256") for r in results)
+    # [G-导出介绍 2026-04-22] 导出列含"介绍"（全文，无截断）：只要有任何一行带了 description 就加列
+    has_desc     = any(r.get("description") for r in results)
 
     headers_list = ["App名称", "包名", "平台", "分类", "商店地址"]
     if has_apk_urls:
@@ -4743,6 +4996,8 @@ def api_download():
         headers_list.append("SHA1")
     if has_sha256:
         headers_list.append("SHA256")
+    if has_desc:
+        headers_list.append("介绍")
 
     def apk_urls_str(r):
         urls = r.get("apk_direct_urls", [])
@@ -4763,6 +5018,9 @@ def api_download():
                 row.append(r.get("sha1", ""))
             if has_sha256:
                 row.append(r.get("sha256", ""))
+            if has_desc:
+                # [G-导出介绍 2026-04-22] 全文导出，不做截断
+                row.append(r.get("description", "") or "")
             if include_icon:
                 row.append(r.get("icon_url", ""))
             writer.writerow(row)
@@ -4812,12 +5070,19 @@ def api_download():
                 values.append(r.get("sha1", ""))
             if has_sha256:
                 values.append(r.get("sha256", ""))
+            if has_desc:
+                # [G-导出介绍 2026-04-22] Excel 下全文导出，介绍里如果有换行 wrap_text 会自然显示
+                values.append(r.get("description", "") or "")
             if include_icon:
                 values.append(r.get("icon_url", ""))
             for col_i, val in enumerate(values, 1 + col_offset):
                 cell = ws.cell(row=row_idx, column=col_i, value=val)
                 cell.border = thin_border
-                cell.alignment = Alignment(vertical="center", wrap_text=bool(has_apk_urls and "\n" in str(val)))
+                # [G-导出介绍 2026-04-22] 介绍/APK 列内容可能很长，统一按
+                # "换行 or 长度>80" 开启 wrap_text，比原先仅靠 apk_urls 更稳
+                sval = str(val) if val is not None else ""
+                need_wrap = ("\n" in sval) or (len(sval) > 80)
+                cell.alignment = Alignment(vertical="center", wrap_text=need_wrap)
 
         # 下载并嵌入图标图片
         if include_icon_image:
@@ -4857,6 +5122,12 @@ def api_download():
             extra_widths.append(70)
         if has_sha1:
             extra_widths.append(55)
+        # [G-导出介绍 2026-04-22] 修顺便一起加 sha256 和 desc 的列宽——
+        # 之前只写了 has_apk_urls / has_sha1，has_sha256 被漏掉会让 SHA256 列挤瘪
+        if has_sha256:
+            extra_widths.append(80)
+        if has_desc:
+            extra_widths.append(60)  # 介绍列：60 字符宽 + wrap_text 自动换行
         if include_icon:
             extra_widths.append(50)
         all_widths = base_widths + extra_widths

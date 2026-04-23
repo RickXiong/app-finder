@@ -334,12 +334,16 @@
         advBadge.hidden = !dirty;
     };
     const updateExtDisabled = () => {
-        const disable = filters.platform === 'ios';
+        // [D-介绍 2026-04-22] desc 在 iOS 下也可用（iTunes Lookup API 直接返回 description），
+        // 所以不在 iOS-only 禁用列表里；apk/sha1/sha256 还是仅 Android
+        const ANDROID_ONLY_EXT = new Set(['apk', 'sha1', 'sha256']);
+        const isIOS = filters.platform === 'ios';
         document.querySelectorAll('[data-group="ext"] .v4-chip').forEach(btn => {
+            const v = btn.dataset.value;
+            const disable = isIOS && ANDROID_ONLY_EXT.has(v);
             btn.classList.toggle('disabled', disable);
-            if (disable) {
-                const v = btn.dataset.value;
-                if (filters.ext.has(v)) { filters.ext.delete(v); btn.classList.remove('on'); }
+            if (disable && filters.ext.has(v)) {
+                filters.ext.delete(v); btn.classList.remove('on');
             }
         });
     };
@@ -523,7 +527,9 @@
     }
     fetchStartupStatus();
 
-    /* 非本机（局域网其它设备访问）不应看到 LAN / 开机启动 等管理入口 */
+    /* 非本机（局域网其它设备访问）不应看到 LAN / 开机启动 / 关闭服务 等管理入口。
+       shutdown 后端 /api/shutdown 本身有 _is_local_request_ip 护栏（非本机 403），
+       前端按钮隐藏是 UX 层面——避免访客看到一个按了就报错的按钮。 */
     (async () => {
         try {
             const r = await fetch('/api/lan_info');
@@ -532,9 +538,35 @@
             if (!d.is_admin) {
                 const lanBtn = $('#btnLan'); if (lanBtn) lanBtn.hidden = true;
                 const autoBtn = $('#btnAutostart'); if (autoBtn) autoBtn.hidden = true;
+                const shutBtn = $('#btnShutdown'); if (shutBtn) shutBtn.hidden = true;
             }
         } catch {}
     })();
+
+    /* ---------- 关闭服务（左上角 danger 按钮） ---------- */
+    /* 用户需求：按下 → 二次确认 → 关后端进程 + 关当前 tab。
+       后端 /api/shutdown 会 setTimeout(0.5s) 后 os._exit(0)，所以前端 fetch 可能被 abort，
+       catch 忽略即可；再给 600ms 让后端走完退出流程，然后 window.close()。
+       window.close() 只对 JS 打开的窗口有效——.app 模式下 Flask 启动时由 webbrowser.open() 打开
+       的不是 JS 窗口，关不掉是已知限制，用户能看到的就是浏览器变 ERR_CONNECTION_REFUSED，
+       这和"程序没了"语义一致，可以接受。 */
+    const btnShutdown = $('#btnShutdown');
+    if (btnShutdown) {
+        btnShutdown.addEventListener('click', async () => {
+            const ok = confirm(
+                '确定关闭 App Finder 服务吗？\n\n' +
+                '关闭后：\n' +
+                '• 本地服务进程会退出；\n' +
+                '• 其他设备已打开的页面会失去连接，需各自手动关闭；\n' +
+                '• 当前窗口会尝试自动关闭。'
+            );
+            if (!ok) return;
+            try { await fetch('/api/shutdown', { method: 'POST' }); } catch {}
+            /* 给后端 0.5s sleep + 进程退出留点余量，然后尝试关当前 tab */
+            setTimeout(() => { try { window.close(); } catch {} }, 600);
+        });
+    }
+
     $('#btnAutostart').addEventListener('click', async () => {
         const next = !_startupEnabled;
         try {
@@ -1282,6 +1314,8 @@
             apk_url_mode: 'single',
             get_sha1: filters.ext.has('sha1'),
             get_sha256: filters.ext.has('sha256'),
+            // [D-介绍 2026-04-22] 新增：抓 App 介绍开关，后端对应 get_description
+            get_description: filters.ext.has('desc'),
             query_interval_ms: getIntervalMs(lines.length),
             // 照抄 main-legacy.js:1203 —— 后端用小写 "all"/"ios"/"android" 比较
             // （app.py:817/819/911/913/4685/4687）。V4 早期版本这里多写了一次大小写
@@ -1423,7 +1457,7 @@
         const tip = $('#toolbarTip');
         if (tip) {
             tip.hidden = false;
-            tip.textContent = nextTip();
+            _setTipText(tip, nextTip());
             _tipsSource   = () => nextTip();
             _tipsInterval = 6000;
             _resetTipsTimer();
@@ -1451,16 +1485,16 @@
         if (!tip) return;
         tip.hidden = false;
         // 结果页第一条：立即换成使用类 tip（别让查询中的冷笑话残留到结果页）
-        tip.textContent = nextUsageTip();
+        _setTipText(tip, nextUsageTip());
         _tipsSource   = () => nextUsageTip();
         _tipsInterval = 9000;   // 结果页比查询中慢一档（6s→9s），降低视觉干扰
         _resetTipsTimer();
         _bindTipClickOnce();
     }
     function _stopTips() {
-        if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }
         _tipsInterval = 0;      // 停止状态下，点击也不会自动恢复计时器
         const tip = $('#toolbarTip');
+        if (tip) _clearTipSchedule(tip);  // 统一清所有计时器 + marquee 监听
         if (tip) {
             tip.hidden = true;
             tip.classList.remove('fade', 'tip-leave', 'tip-enter-init', 'tip-enter-active');
@@ -1475,14 +1509,73 @@
     let _tipsInterval = 9000;    // 自动轮播间隔（0 = 已停止）
     let _tipSwapping  = false;   // 防止重入：一次动画进行中时忽略新触发
     let _tipClickBound = false;
+    // [N-跑马灯 2026-04-22] 轮播从 setInterval 改为单次 setTimeout，每条 tip 结束后动态调度下一条：
+    // 不溢出 → 9s 后切；溢出 → marquee 动画 4s + 停 2s 后切。
+    let _tipNextTimer = null;
+    let _tipMarqueeEndListener = null;
+
+    // 包一层 inner span，方便 marquee 时对内容做 translateX 而不动父容器
+    function _setTipText(tipEl, text) {
+        tipEl.innerHTML = '';
+        const inner = document.createElement('span');
+        inner.className = 'v4-toolbar-tip-inner';
+        inner.textContent = text || '';
+        tipEl.appendChild(inner);
+    }
+
+    function _clearTipSchedule(tipEl) {
+        if (_tipNextTimer) { clearTimeout(_tipNextTimer); _tipNextTimer = null; }
+        if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }  // 兼容老字段
+        if (tipEl) {
+            const inner = tipEl.querySelector('.v4-toolbar-tip-inner');
+            if (inner && _tipMarqueeEndListener) {
+                inner.removeEventListener('animationend', _tipMarqueeEndListener);
+            }
+            _tipMarqueeEndListener = null;
+            tipEl.classList.remove('marquee-run');
+        }
+    }
+
+    // 根据当前 tip 文本是否溢出，决定下一条切换时机
+    function _scheduleNextTip(tipEl) {
+        _clearTipSchedule(tipEl);
+        if (!_tipsInterval) return;
+        const inner = tipEl.querySelector('.v4-toolbar-tip-inner');
+        if (!inner) {
+            _tipNextTimer = setTimeout(_swapTip, _tipsInterval);
+            return;
+        }
+        void inner.offsetWidth;  // 强制回流，拿真实 scrollWidth
+        const overflow = inner.scrollWidth > tipEl.clientWidth + 2;
+        if (!overflow) {
+            _tipNextTimer = setTimeout(_swapTip, _tipsInterval);
+            return;
+        }
+        // 溢出 → 启动 marquee 动画
+        tipEl.classList.add('marquee-run');
+        _tipMarqueeEndListener = (e) => {
+            if (e.animationName !== 'v4-toolbar-tip-marquee') return;
+            inner.removeEventListener('animationend', _tipMarqueeEndListener);
+            _tipMarqueeEndListener = null;
+            // 尾部完全滑出后停 2s 再切下一条
+            _tipNextTimer = setTimeout(() => {
+                tipEl.classList.remove('marquee-run');
+                _swapTip();
+            }, 2000);
+        };
+        inner.addEventListener('animationend', _tipMarqueeEndListener);
+    }
+
     function _swapTip() {
         const tipEl = $('#toolbarTip');
         if (!tipEl || !_tipsSource || _tipSwapping) return;
         _tipSwapping = true;
         tipEl.classList.remove('tip-enter-init', 'tip-enter-active');
+        // 切换动画开始前，清旧的 marquee 调度（避免新 tip 还没来马灯又触发）
+        _clearTipSchedule(tipEl);
         tipEl.classList.add('tip-leave');
         setTimeout(() => {
-            tipEl.textContent = _tipsSource();
+            _setTipText(tipEl, _tipsSource());
             tipEl.classList.remove('tip-leave');
             tipEl.classList.add('tip-enter-init');
             // 双 rAF 保证浏览器应用 init 起点后再过渡到 active
@@ -1493,15 +1586,17 @@
                     setTimeout(() => {
                         tipEl.classList.remove('tip-enter-active');
                         _tipSwapping = false;
+                        // 新 tip 完全稳定后，根据其长度决定下一次切换节奏
+                        _scheduleNextTip(tipEl);
                     }, 160);
                 });
             });
         }, 150);
     }
     function _resetTipsTimer() {
-        if (tipsTimer) { clearInterval(tipsTimer); tipsTimer = null; }
-        if (!_tipsInterval) return;
-        tipsTimer = setInterval(_swapTip, _tipsInterval);
+        const tipEl = $('#toolbarTip');
+        if (!tipEl) return;
+        _scheduleNextTip(tipEl);
     }
     function _bindTipClickOnce() {
         if (_tipClickBound) return;
@@ -1612,6 +1707,10 @@
         { key: 'download_url', label: 'APK 直链', sortable: false, requires: () => filters.ext.has('apk') },
         { key: 'sha1', label: 'SHA1', sortable: false, requires: () => filters.ext.has('sha1') },
         { key: 'sha256', label: 'SHA256', sortable: false, requires: () => filters.ext.has('sha256') },
+        // [F-介绍列 2026-04-22] 仅当用户在"高级-扩展"里勾选"介绍"才出现；
+        // 单元格只显示前 5 个字符（Array.from 按 code point 切，支持 emoji/CJK），
+        // 整段介绍走 data-copy 全文复制（走 1974+ 行的全局委托），hover 悬浮看完整内容
+        { key: 'description', label: '介绍', sortable: false, requires: () => filters.ext.has('desc') },
         { key: 'actions', label: '', sortable: false },
     ];
     const visibleCols = () => COLS.filter(c => !c.requires || c.requires());
@@ -1633,7 +1732,7 @@
                 }
                 // 跨端补全的结果打一个极小的「补」badge，提示可能非严格同一 App
                 const extBadge = r.extended_fill
-                    ? ` <span class="v4-ext-badge" title="跨端补全结果：根据另一端 App 名反查，可能非严格同一应用">补</span>`
+                    ? ` <span class="v4-ext-badge" title="自动补齐的另一端版本，请核对是否同一 App">补</span>`
                     : '';
                 // 点击 app 名即复制
                 return `<span class="v4-app-name copyable" data-copy="${esc(name)}" title="点击复制">${esc(name)}</span>${extBadge}`;
@@ -1651,8 +1750,13 @@
                 const cls = r.platform === 'iOS' ? 'ios' : 'android';
                 return `<span class="chip ${cls}">${esc(r.platform)}</span>`;
             }
-            case 'category':
-                return `<span class="v4-cat">${esc(r.category || '-')}</span>`;
+            case 'category': {
+                // [I-分类复制 2026-04-22] 按用户反馈，分类值也可点击复制，
+                // 走全局 .copyable[data-copy] 委托（见本文件 1974+ 行）。
+                const cat = r.category || '';
+                if (!cat) return `<span class="v4-cat">-</span>`;
+                return `<span class="v4-cat copyable" data-copy="${esc(cat)}" title="点击复制">${esc(cat)}</span>`;
+            }
             case 'store_url': {
                 if (!r.download_url) return '<span style="color:var(--text-quaternary)">—</span>';
                 const display = r.download_url.replace(/^https?:\/\//, '');
@@ -1682,6 +1786,15 @@
             case 'sha256':
                 if (r.platform === 'iOS') return '<span class="v4-na" title="该字段仅 Android 有">iOS 无此项</span>';
                 return r.sha256 ? `<span class="v4-sha mono" title="${esc(r.sha256)} (点击复制)">${esc(r.sha256)}</span>` : '-';
+            case 'description': {
+                // [F-介绍列 2026-04-22] 前 5 码点做摘要；>5 补省略号；全文放 data-copy
+                // + title；走全局 .copyable[data-copy] 委托实现点击复制。
+                const desc = (r.description || '').trim();
+                if (!desc) return '<span style="color:var(--text-quaternary)">—</span>';
+                const arr = Array.from(desc);
+                const preview = arr.length > 5 ? arr.slice(0, 5).join('') + '…' : desc;
+                return `<span class="v4-desc copyable" data-copy="${esc(desc)}" title="${esc(desc)}\n\n(点击复制全文)">${esc(preview)}</span>`;
+            }
             case 'actions':
                 if (!r.incomplete || !r.package_name) return '';
                 return `<button class="v4-row-retry" data-retry-pkg="${esc(r.package_name)}" title="重查这一条">

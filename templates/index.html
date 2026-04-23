@@ -16,6 +16,15 @@
 <body>
 <div class="v4-root" id="v4Root">
 
+    <!-- ===== Top-left actions (shutdown — only visible to本机 admin，非本机由 JS 隐藏) ===== -->
+    <div class="v4-top-actions-left">
+        <button class="v4-icon-btn v4-icon-btn-danger" id="btnShutdown" title="关闭服务（点击停止 App Finder）" aria-label="Shutdown">
+            <!-- log-out 箭头图标：和右上角 btnAutostart 的 power 图标完全不同形状，用户明确要求"要区分下"。
+                 +hover 红色（.v4-icon-btn-danger）进一步强调破坏性操作。 -->
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+    </div>
+
     <!-- ===== Top-right actions ===== -->
     <div class="v4-top-actions">
         <button class="v4-icon-btn" id="btnLan" title="手机 / 其他设备访问" aria-label="LAN">
@@ -108,7 +117,8 @@
                             <button type="button" class="v4-chip" data-value="apk">APK 直链</button>
                             <button type="button" class="v4-chip" data-value="sha1">SHA1</button>
                             <button type="button" class="v4-chip" data-value="sha256">SHA256</button>
-                            <span class="v4-adv-hint">仅 Android · 耗时较长</span>
+                            <button type="button" class="v4-chip" data-value="desc" title="抓取 App 介绍（耗时较长）">介绍</button>
+                            <span class="v4-adv-hint">耗时较长</span>
                         </div>
                     </div>
                     <div class="v4-adv-row">

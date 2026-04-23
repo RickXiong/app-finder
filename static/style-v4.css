@@ -122,6 +122,11 @@ html, body { overflow-x: clip; max-width: 100vw; }
   position: absolute; top: 18px; right: 16px; z-index: 60;
   display: flex; gap: 4px; align-items: center;
 }
+/* ===== Top-left action icons (shutdown 专用：用户要求左上角，独立容器，仅本机 admin 可见) ===== */
+.v4-top-actions-left {
+  position: absolute; top: 18px; left: 16px; z-index: 60;
+  display: flex; gap: 4px; align-items: center;
+}
 .v4-icon-btn {
   width: 32px; height: 32px;
   display: inline-grid; place-content: center;
@@ -138,6 +143,14 @@ html, body { overflow-x: clip; max-width: 100vw; }
   box-shadow: 0 2px 6px oklch(0.58 0.15 var(--brand-h) / 0.35);
 }
 .v4-icon-btn.on:hover { background: var(--brand); color: #fff; filter: brightness(1.08); }
+
+/* Danger variant —— 破坏性操作（目前只用于左上 shutdown），默认看着和其他 icon 一致（灰色），
+   hover 时换成红色 + 白字，和右上 autostart 的"主题色 on"状态在颜色上明确区分。
+   用户要求："和开启启动的按钮要区分下" → 形状不同（log-out 箭头 vs power 按钮）+ 颜色不同（红 vs 主题色）。 */
+.v4-icon-btn-danger:hover {
+  background: oklch(0.58 0.2 25);  /* 红色（色相 25 ≈ tomato red） */
+  color: #fff;
+}
 
 /* Legacy switcher — small text pill in top-right */
 .v4-legacy-switch {
@@ -639,10 +652,37 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-toolbar-tip.tip-leave      { transform: translateY(-10px); opacity: 0; }
 .v4-toolbar-tip.tip-enter-init { transform: translateY(10px);  opacity: 0; transition: none; }
 .v4-toolbar-tip.tip-enter-active { transform: translateY(0);   opacity: 1; }
+
+/* [N-跑马灯 2026-04-22] 长 tip 跑马灯
+   需求：溢出才跑 / 4s 线性滚完 / 尾部完全滑出后停 2s（JS 处理）/ hover 暂停。
+   结构：.v4-toolbar-tip 里包一层 .v4-toolbar-tip-inner（JS 生成），
+         父层保持 overflow:hidden + ellipsis（非跑马灯场景不变），
+         跑马灯时让 inner 作为 inline-block 独立 translateX，不动父。 */
+.v4-toolbar-tip-inner { display: inline; }
+.v4-toolbar-tip.marquee-run {
+  text-overflow: clip;           /* 跑马灯时不要省略号 */
+}
+.v4-toolbar-tip.marquee-run .v4-toolbar-tip-inner {
+  display: inline-block;         /* transform 对 inline 无效，必须转 inline-block */
+  animation: v4-toolbar-tip-marquee 4s linear forwards;
+}
+.v4-toolbar-tip.marquee-run:hover .v4-toolbar-tip-inner {
+  animation-play-state: paused;  /* 鼠标停上去暂停阅读 */
+}
+@keyframes v4-toolbar-tip-marquee {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(calc(-100% - 20px)); }  /* -100% = 内容自宽，再多 20px 确保尾部完全离开 */
+}
 /* 兼容旧的 .fade 类（如有残留） */
 .v4-toolbar-tip.fade { opacity: 0; }
 
 /* ===== Results (design v4-google) ===== */
+/* [J-响应式断点 2026-04-22] 窄屏保持老样子（1400），宽屏阶梯放开，
+   防止 4K/宽屏下两边大片留白 + SHA256 被截的尴尬。
+   - 默认（<1920px）  : 1400px —— 和老版一致
+   - 1920px 及以上    : 1800px —— 常见 1080p 显示器放一点
+   - 2560px 及以上    : 2300px —— 2K / 超宽屏 / Windows 共享宽屏
+   断点走 min-width，层层覆盖上层 max-width。 */
 .v4-results {
   flex: 1;
   display: flex;
@@ -652,6 +692,12 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   width: 100%;
   margin: 0 auto;
   padding: 0;
+}
+@media (min-width: 1920px) {
+  .v4-results { max-width: 1800px; }
+}
+@media (min-width: 2560px) {
+  .v4-results { max-width: 2300px; }
 }
 
 /* Toolbar (design: .v4-tb) */
@@ -733,9 +779,12 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   color: var(--text);
   letter-spacing: -0.1px;
 }
-/* app 名复制 hover 风格 = 包名风格：只变小手指针，无色彩 / 无下划线 */
-.v4-app-name.copyable { cursor: pointer; }
-.v4-card-name.copyable { cursor: pointer; }
+/* [统一体验 2026-04-23] 所有可复制元素 = 小手指针。
+   凡是挂了 `.copyable` class（约定：必配 data-copy 全局委托）的元素都要手形——
+   过去一条条给 .v4-app-name / .v4-card-name 写 cursor，每加一个新字段（分类、介绍等）
+   都要在 CSS 里单加一行，常常漏掉，用户反馈"分类放上去不是手形、体验不统一"。
+   改成全局一条，新字段只要带 copyable 就天然一致。*/
+.copyable { cursor: pointer; }
 /* iOS 无此项 / Android 无此项 —— 比空格/短横线更明确的"结构性空" */
 .v4-na {
   color: var(--text-quaternary);
@@ -1028,6 +1077,21 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-table th[data-col="download_url"]  { width: 240px; }
 .v4-table th[data-col="sha1"]          { width: 100px; }
 .v4-table th[data-col="sha256"]        { width: 100px; }
+/* [F-介绍列 2026-04-22] 前 5 字 + 省略号，窄列即可；全文靠 hover title 显示 */
+.v4-table th[data-col="description"]   { width: 80px; }
+
+/* [J-响应式 2026-04-22] 宽屏下放宽 SHA1/SHA256 列宽，和 .v4-results 断点对齐。
+   SHA1 完整 40 字节 hex+冒号 ≈ 59 字符（约 420px 等宽）；
+   SHA256 完整 64 字节 hex+冒号 ≈ 95 字符（约 680px 等宽）；
+   这里给的宽度是"尽量不截"，但仍可能截几位——配合点击复制和 hover 能查全文。 */
+@media (min-width: 1920px) {
+  .v4-table th[data-col="sha1"]   { width: 180px; }
+  .v4-table th[data-col="sha256"] { width: 280px; }
+}
+@media (min-width: 2560px) {
+  .v4-table th[data-col="sha1"]   { width: 240px; }
+  .v4-table th[data-col="sha256"] { width: 460px; }
+}
 
 .v4-table td { overflow: hidden; }
 
@@ -1050,6 +1114,16 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   display: inline-block;
   max-width: 100%;
   font-size: 11px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* [F-介绍列 2026-04-22] 介绍单元格：窄列显示前 5 字，单行截断 + 点击复制全文
+   cursor 由全局 .copyable 规则提供，这里不再重复 */
+.v4-desc {
+  display: inline-block;
+  max-width: 100%;
+  color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: middle;
 }
