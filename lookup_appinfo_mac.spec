@@ -3,7 +3,9 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('templates', 'templates'), ('static', 'static')]
 binaries = []
-hiddenimports = ['requests', 'bs4', 'openpyxl', 'cryptography', 'lxml', 'lxml.etree', 'lxml._elementpath',
+# [slim 2026-04-23] 从 hiddenimports 里拿掉 lxml/lxml.etree/lxml._elementpath：
+# venv 里已卸载 lxml，app.py 已有 try/except 自动回退到 html.parser；保留会触发 PyInstaller WARN。
+hiddenimports = ['requests', 'bs4', 'openpyxl', 'cryptography',
                   'qrcode', 'qrcode.image.pil',
                   'tkinter']
 tmp_ret = collect_all('PIL')

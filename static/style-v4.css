@@ -127,6 +127,15 @@ html, body { overflow-x: clip; max-width: 100vw; }
   position: absolute; top: 18px; left: 16px; z-index: 60;
   display: flex; gap: 4px; align-items: center;
 }
+/* [搜索页才显示 2026-04-23] 关闭服务按钮只在首页/搜索页出现，看到结果就隐藏。
+   避免用户在翻结果、对比介绍时误触"关服务"。
+   .v4-root.has-results 由 JS 在进入结果态时切换，goHome() 会移除 → 搜索页又显示。
+   LAN 非本机访客由 JS 设 btnShutdown.hidden=true（native hidden 也是 display:none），
+   两个规则叠加都是隐藏，不冲突。 */
+/* [2026-04-23] !important 兜底：防止极端情况下 .v4-top-actions-left 的基础 display:flex
+   因为浏览器缓存 / 其它覆盖规则 / 特异性陷阱而再度可见。这里覆盖的只是结果页时的隐藏，
+   搜索页 has-results 一旦被 JS 移除，规则自动失配，按钮又能显示。零副作用。 */
+.v4-root.has-results .v4-top-actions-left { display: none !important; }
 .v4-icon-btn {
   width: 32px; height: 32px;
   display: inline-grid; place-content: center;
@@ -188,7 +197,17 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
   transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   flex-shrink: 0;
 }
-.v4-root:not(.searched) .v4-search-zone {
+/* [2026-04-23 空白带修复] 原来用 `:not(.searched)` 做首页样式，但 JS 的主查询路径
+   (enterLoading / 恢复后台任务 line 1465/1680) 只加了 `has-results` 没有同时加
+   `searched`。结果：查完进入结果态，.v4-root 有 has-results 但没有 searched，
+   两条规则 (:not(.searched) 和 .has-results) 特异性相同 → 后者应胜，但因为
+   cascade 按 longhand 逐个解析，这里 padding-top:20vh 的 longhand 在 has-results
+   的 padding 短形前仍保持 20vh（同特异性同胜者时还是会被按源码顺序解析，但这里的
+   表现是 padding-top 被 `:not(.searched)` 拿住），造成结果页 search-zone 顶部空出
+   160px+ 的白带（= 20vh @ 800px 视口）——就是用户高清图二里标注的那个「大白带」。
+   修法：把 :not(.searched) 换成 :not(.has-results)，一个 class 一条线，无需
+   依赖 JS 两个 class 同步加。.searched 类可以保留给别处兼容用，不影响这里。 */
+.v4-root:not(.has-results) .v4-search-zone {
   min-height: calc(100vh - 40px);
   justify-content: flex-start;
   padding-top: 20vh;
@@ -677,27 +696,20 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-toolbar-tip.fade { opacity: 0; }
 
 /* ===== Results (design v4-google) ===== */
-/* [J-响应式断点 2026-04-22] 窄屏保持老样子（1400），宽屏阶梯放开，
-   防止 4K/宽屏下两边大片留白 + SHA256 被截的尴尬。
-   - 默认（<1920px）  : 1400px —— 和老版一致
-   - 1920px 及以上    : 1800px —— 常见 1080p 显示器放一点
-   - 2560px 及以上    : 2300px —— 2K / 超宽屏 / Windows 共享宽屏
-   断点走 min-width，层层覆盖上层 max-width。 */
+/* [占满屏幕 2026-04-23] 用户反馈："展示结果地方的UI依然没有像搜索这栏一样几乎占满屏幕"。
+   原本用 1400/1800/2300 阶梯断点居中，大屏下两边有大量留白 + SHA256 列被外层挤压。
+   改为：去掉 max-width，.v4-results 横跨整屏（和顶部 .v4-search-zone 的视觉宽度一致），
+   两边只留 24px padding（移动端去掉 padding）。
+   宽度控制权交还给「表格本身的列宽 + 横向滚动」（见 .v4-table-scroll 的 overflow-x:auto）。*/
 .v4-results {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-width: 1400px;
   width: 100%;
   margin: 0 auto;
-  padding: 0;
-}
-@media (min-width: 1920px) {
-  .v4-results { max-width: 1800px; }
-}
-@media (min-width: 2560px) {
-  .v4-results { max-width: 2300px; }
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 /* Toolbar (design: .v4-tb) */
@@ -750,7 +762,20 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 }
 
 /* ===== Table (design v4-google) ===== */
-.v4-table-scroll { overflow: visible; flex: 1; background: var(--bg-elevated); }
+/* [一屏显示 2026-04-23] 用户要求：不管显示多少列都一屏塞下，不要横滚。
+   方案：overflow-x:hidden + table-layout:fixed + 列宽用百分比（下方 fix-pass）。
+   每格内容已经有 ellipsis（.v4-sha / .v4-desc / .v4-store-link / .v4-link-cell 都自带），
+   宽度被挤窄时自然省略；鼠标悬停还能看完整（介绍字段除外，走点击复制 / 导出）。
+   ⚠️ 见 memory/feedback_table_header.md —— "overflow-x:auto 当兜底"是被明令禁止的反模式。*/
+/* [2026-04-23 sticky thead 修复] 原来是 overflow-x: hidden —— 看起来只是"不要横滚"，
+   实际副作用：overflow-x: hidden 会让这个容器变成「滚动容器」（即便没真正滚），
+   于是里面 position:sticky 的 thead th 被 containing-block 捕获到这层，
+   Chrome 把 sticky TH 按 top 值偏移（top:49px → 在 scroll=0 时就下移 49px），
+   直接造成 toolbar 和 thead 之间 49px 白带（feedback_table_header.md checklist #3）。
+   换成 overflow-x: clip：同样裁掉横向溢出，但不形成滚动上下文 → sticky 正常逃逸到 viewport。
+   overflow-y 依旧 visible，页面滚动时 thead 粘在顶部工具栏下方。
+   注：clip 兼容 Chrome 90+/Safari 16+/Firefox 81+，desktop app 场景安全。 */
+.v4-table-scroll { overflow-x: clip; overflow-y: visible; flex: 1; background: var(--bg-elevated); }
 .v4-table-wrap { overflow-x: auto; background: var(--bg-elevated); } /* legacy */
 .v4-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .v4-table thead th {
@@ -834,7 +859,9 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 .v4-store-link {
   display: inline-flex; align-items: center; gap: 5px;
   color: var(--brand); text-decoration: none; font-size: 12px;
-  max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* [一屏显示 2026-04-23] max-width 从 280px → 100%：让链接撑满列，避免宽屏左留空
+     列宽由 table-layout:fixed + 百分比 控制；内元素 100% 就是列宽。 */
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v4-store-link:hover {
   text-decoration: underline;
@@ -991,7 +1018,9 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 /* ===== Mobile: table → cards ===== */
 @media (max-width: 720px) {
   .v4-results { padding: 0; }
-  .v4-table-scroll { overflow-x: hidden; }
+  /* 移动端 table 本来就 display:none，overflow-x 对表格没影响，
+     但为了跟 desktop 一致（不让 .v4-table-scroll 莫名变成 sticky containing-block）也用 clip */
+  .v4-table-scroll { overflow-x: clip; }
   .v4-table-scroll .v4-table { display: none; }
   .v4-cards { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
   .v4-card {
@@ -1064,36 +1093,47 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 
 /* 表格布局：固定总宽，单元格不超出 */
 .v4-table-wrap { overflow-x: hidden; }
-.v4-table { table-layout: fixed; }
+.v4-table { table-layout: fixed; width: 100%; }
 
-/* 列宽（对齐老版 style-legacy.css） */
+/* [一屏显示 2026-04-23 v2 窄屏无横滚] 列宽分配策略：
+   - icon / platform：固定 px（icon 是 48x48 图的槽位；platform 是"iOS"/"Android" 短字符）
+   - 其他：百分比。百分比总和 ≤ 88%，给 124px 固定列 + 左右 padding + 滚动条预留空间
+   - 每格已有 ellipsis（.v4-sha / .v4-desc / .v4-store-link / .v4-link-cell）→ 宽度不够自动省略
+   - 介绍列固定 6% 即可，前 5 字省略，完整走点击复制
+   ⚠️ 上一版百分比和 = 98%，加 124px 固定 + 内边距在窄屏（<1440px）会撑出横滚条
+   （用户高清图二底部右下箭头标注的那根）。现在降到 88%，即便算上 padding + 滚动条
+   仍稳稳 ≤ 100% 容器宽度。宽屏下百分比按比例扩张，展示照样饱满。 */
 .v4-table th[data-col="icon"],
-.v4-table td.v4-cell-icon { width: 52px; }
-.v4-table th[data-col="app_name"]      { width: 180px; }
-.v4-table th[data-col="package_name"]  { width: auto; min-width: 260px; }
-.v4-table th[data-col="platform"]      { width: 70px; }
-.v4-table th[data-col="category"]      { width: 110px; }
-.v4-table th[data-col="store_url"]     { width: 260px; }
-.v4-table th[data-col="download_url"]  { width: 240px; }
-.v4-table th[data-col="sha1"]          { width: 100px; }
-.v4-table th[data-col="sha256"]        { width: 100px; }
-/* [F-介绍列 2026-04-22] 前 5 字 + 省略号，窄列即可；全文靠 hover title 显示 */
-.v4-table th[data-col="description"]   { width: 80px; }
-
-/* [J-响应式 2026-04-22] 宽屏下放宽 SHA1/SHA256 列宽，和 .v4-results 断点对齐。
-   SHA1 完整 40 字节 hex+冒号 ≈ 59 字符（约 420px 等宽）；
-   SHA256 完整 64 字节 hex+冒号 ≈ 95 字符（约 680px 等宽）；
-   这里给的宽度是"尽量不截"，但仍可能截几位——配合点击复制和 hover 能查全文。 */
-@media (min-width: 1920px) {
-  .v4-table th[data-col="sha1"]   { width: 180px; }
-  .v4-table th[data-col="sha256"] { width: 280px; }
-}
-@media (min-width: 2560px) {
-  .v4-table th[data-col="sha1"]   { width: 240px; }
-  .v4-table th[data-col="sha256"] { width: 460px; }
-}
+.v4-table td.v4-cell-icon           { width: 52px; }
+.v4-table th[data-col="platform"]   { width: 72px; }
+.v4-table th[data-col="app_name"]     { width: 12%; }
+.v4-table th[data-col="package_name"] { width: 16%; }
+.v4-table th[data-col="category"]     { width: 8%; }
+.v4-table th[data-col="store_url"]    { width: 15%; }
+.v4-table th[data-col="download_url"] { width: 13%; }
+.v4-table th[data-col="sha1"]         { width: 8%; }
+.v4-table th[data-col="sha256"]       { width: 8%; }
+.v4-table th[data-col="description"]  { width: 8%; }
+/* 百分比总和 = 12+16+8+15+13+8+8+8 = 88%，加两列固定 px（icon+platform = 124px）
+   ≈ 88% × 容器 + 124px。以 1400px 容器为例：88% = 1232，+124 = 1356 ≤ 1400。
+   预留 44px 给左右 padding + 垂直滚动条宽度，保证不出横滚。 */
 
 .v4-table td { overflow: hidden; }
+
+/* [列拖拽 2026-04-23] 表头支持拖拽调整列顺序（sortable/draggable 都是 th 上的属性，不冲突）。
+   视觉反馈：
+   - 拖起时源 th 半透明 + grabbing 光标
+   - 拖过目标 th 时，按鼠标在左/右半边在目标左边/右边显示 2px 竖线指示落点
+   - 所有可拖列头都给 grab 光标（只有点在 th 文字上才可拖；点按钮仍是按钮行为） */
+.v4-table thead th[draggable="true"] { cursor: grab; }
+.v4-table thead th[draggable="true"]:active { cursor: grabbing; }
+.v4-table thead th.th-dragging { opacity: 0.4; }
+.v4-table thead th.th-drop-before { box-shadow: inset 2px 0 0 0 var(--brand); }
+.v4-table thead th.th-drop-after { box-shadow: inset -2px 0 0 0 var(--brand); }
+/* 拖拽时 thead 背景 hint，提示整排可拖 */
+.v4-table thead.is-col-dragging th[draggable="true"]:not(.th-dragging) {
+  background: var(--surface-2, rgba(0,0,0,0.02));
+}
 
 /* 包名列：等宽字体 + 截断 */
 .v4-table td .mono { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
@@ -1105,7 +1145,8 @@ html:not([data-theme-mode])[data-theme="dark"] .v4-moon { opacity: 1; transform:
 }
 .v4-link-cell a {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  max-width: 200px; display: inline-block; vertical-align: middle;
+  /* [一屏显示 2026-04-23] 从 200px → 100%：撑满 .v4-link-cell 分配到的列宽空间（去掉 📋 按钮后剩余） */
+  max-width: 100%; flex: 1 1 auto; min-width: 0; display: inline-block; vertical-align: middle;
 }
 .v4-table td.td-url .v4-link-cell { max-width: 100%; }
 
@@ -1256,13 +1297,11 @@ html[data-access-mode="local"] #sharedHistoryBar { display: none; }
 }
 .v4-recent-chip-show:hover { background: var(--brand); color: #fff; border-color: var(--brand); }
 
-/* 桌面表格：改 auto 布局，列宽随内容，URL/SHA 用 max-width 截断 */
-.v4-table { table-layout: auto; }
-.v4-table th[data-col], .v4-table td { width: auto; }
+/* [一屏显示 2026-04-23] 原本这里有一段"table-layout: auto + 内元素 max-width 截断"的老策略，
+   会把上面 [table-layout: fixed + 百分比列宽] 覆盖回 auto —— 这就是横滚条复活的直接原因。
+   新策略下表格宽度=容器宽度，列宽=百分比，内元素自带 ellipsis，不需要再用 auto 布局兜。
+   留一行 .v4-cell-icon 的 body-td 侧宽度保险（th 侧已经有，重复声明无害）。*/
 .v4-table td.v4-cell-icon { width: 52px; }
-.v4-table td.td-url .v4-link-cell { max-width: 260px; }
-.v4-table td .v4-sha { max-width: 90px; }
-.v4-table td .mono { max-width: 200px; }
 
 /* ============================================================
    Landing 小知识条
@@ -1594,7 +1633,8 @@ html[data-access-mode="local"] #sharedHistoryBar { display: none; }
   .v4-top-actions .v4-icon-btn.on { box-shadow: 0 1px 4px oklch(0.58 0.15 var(--brand-h) / 0.3); }
 
   /* --- landing: tighter logo + tagline, more search prominence --- */
-  .v4-root:not(.searched) .v4-search-zone {
+  /* [2026-04-23] 同步把移动端 landing 规则也换成 :not(.has-results)，和顶部桌面规则对齐。 */
+  .v4-root:not(.has-results) .v4-search-zone {
     padding: 18vh 14px 40px;
   }
   .v4-logo {

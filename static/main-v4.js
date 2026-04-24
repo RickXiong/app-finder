@@ -297,7 +297,14 @@
     input.addEventListener('keydown', (e) => {
         // isComposing: 中文输入法正在选字时，Enter 属于确认候选，不应该触发查询。
         if (e.isComposing) return;
-        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); triggerQuery(); }
+        // ⌘/Ctrl+Enter：任何时候都触发查询（默认交互，不受下面开关影响）
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); triggerQuery(); return; }
+        // [2026-04-23]「Enter 键查询」开关：开启后按 Enter 直接查询；换行让位给 Shift+Enter。
+        // 默认关闭（opts 里没 'enter_query'），此时 Enter 按默认行为换行，符合批量输入场景。
+        if (e.key === 'Enter' && !e.shiftKey && filters.opts.has('enter_query')) {
+            e.preventDefault();
+            triggerQuery();
+        }
     });
     $('#btnQuery').addEventListener('click', triggerQuery);
 
@@ -323,14 +330,26 @@
         setAdvOpen(false);
     });
 
-    // opts: 行为开关（默认都开）。extended = 跨端补全；keep = 保留输入
-    const filters = { platform: 'all', match: 'fuzzy', ext: new Set(), opts: new Set(['extended', 'keep']) };
-    const OPT_DEFAULTS = new Set(['extended', 'keep']);
+    // [默认值 2026-04-23 修正] 参考用户截图 Pasted image 20260423174136.png：
+    //   扩展（APK 直链 / SHA1 / SHA256 / 介绍）：默认全关——这几项要么耗时（desc/apk）要么只对
+    //     特定场景有用（sha），做成"需要时自己开"避免每次查询都扫 SHA/抓介绍拖慢大盘。
+    //   行为（跨端补全 / 保留输入 / Enter 键查询）：默认全开——这三项都是改善日常输入体验的
+    //     无副作用开关，默认就该开，懒得再手动勾。
+    // 上一轮我错把 ext 也做成默认全开，被用户截图纠正："垃圾"——这条注释留着自己看，别再错。
+    const EXT_DEFAULTS = new Set();  // 空集：ext chip 默认全不选
+    const OPT_DEFAULTS = new Set(['extended', 'keep', 'enter_query']);
+    const filters = {
+        platform: 'all', match: 'fuzzy',
+        ext:  new Set(EXT_DEFAULTS),
+        opts: new Set(OPT_DEFAULTS),
+    };
     const updateAdvBadge = () => {
-        // opts 与默认值不同才算"脏"：默认都开，只有关掉某个才算用户修改
+        // 默认全开，所以"脏"=和默认集合不完全一致
+        const extDirty = filters.ext.size !== EXT_DEFAULTS.size
+            || [...EXT_DEFAULTS].some(k => !filters.ext.has(k));
         const optsDirty = filters.opts.size !== OPT_DEFAULTS.size
             || [...OPT_DEFAULTS].some(k => !filters.opts.has(k));
-        const dirty = filters.platform !== 'all' || filters.match !== 'fuzzy' || filters.ext.size > 0 || optsDirty;
+        const dirty = filters.platform !== 'all' || filters.match !== 'fuzzy' || extDirty || optsDirty;
         advBadge.hidden = !dirty;
     };
     const updateExtDisabled = () => {
@@ -367,11 +386,12 @@
         });
     });
     $('#btnResetAdv').addEventListener('click', () => {
-        filters.platform = 'all'; filters.match = 'fuzzy'; filters.ext.clear();
+        filters.platform = 'all'; filters.match = 'fuzzy';
+        filters.ext  = new Set(EXT_DEFAULTS);
         filters.opts = new Set(OPT_DEFAULTS);
         document.querySelectorAll('[data-group="platform"] .v4-chip').forEach(b => b.classList.toggle('on', b.dataset.value === 'all'));
         document.querySelectorAll('[data-group="match"] .v4-chip').forEach(b => b.classList.toggle('on', b.dataset.value === 'fuzzy'));
-        document.querySelectorAll('[data-group="ext"] .v4-chip').forEach(b => b.classList.remove('on'));
+        document.querySelectorAll('[data-group="ext"] .v4-chip').forEach(b => b.classList.toggle('on', EXT_DEFAULTS.has(b.dataset.value)));
         document.querySelectorAll('[data-group="opts"] .v4-chip').forEach(b => b.classList.toggle('on', OPT_DEFAULTS.has(b.dataset.value)));
         updateExtDisabled(); updateAdvBadge();
         _persistFilters();   // 重置也要同步掉线上旧值，别让刷新后服务端 push 复活老设置
@@ -388,11 +408,16 @@
        序列化形式：{platform: 'all'|..., match: 'fuzzy'|..., ext: ['sha256',...], opts: [...] }
        —— Set 必须转 array 才能 JSON；hydrate 时再 new Set()。 */
     const FILTERS_LS_KEY = 'app_finder_v4_filters';
+    // [2026-04-24] 'desc'（介绍）不进持久化 / 不跨浏览器同步：
+    //   snapshot 时把它从 ext 里剔除，hydrate/server-sync 时也剔。
+    //   本次会话内勾选依然生效（内存 filters.ext 仍保留），但刷新后归零。
+    //   原因：抓介绍耗时且多数场景用不到，每次默认不选更符合主使用路径。
+    const EXT_NO_PERSIST = new Set(['desc']);
     function _filtersSnapshot() {
         return {
             platform: filters.platform,
             match:    filters.match,
-            ext:      [...filters.ext],
+            ext:      [...filters.ext].filter(x => !EXT_NO_PERSIST.has(x)),
             opts:     [...filters.opts],
         };
     }
@@ -402,7 +427,7 @@
         let touched = false;
         if (typeof raw.platform === 'string') { filters.platform = raw.platform; touched = true; }
         if (typeof raw.match    === 'string') { filters.match    = raw.match;    touched = true; }
-        if (Array.isArray(raw.ext))  { filters.ext  = new Set(raw.ext.filter(x => typeof x === 'string'));  touched = true; }
+        if (Array.isArray(raw.ext))  { filters.ext  = new Set(raw.ext.filter(x => typeof x === 'string' && !EXT_NO_PERSIST.has(x)));  touched = true; }
         if (Array.isArray(raw.opts)) { filters.opts = new Set(raw.opts.filter(x => typeof x === 'string')); touched = true; }
         return touched;
     }
@@ -1713,7 +1738,90 @@
         { key: 'description', label: '介绍', sortable: false, requires: () => filters.ext.has('desc') },
         { key: 'actions', label: '', sortable: false },
     ];
-    const visibleCols = () => COLS.filter(c => !c.requires || c.requires());
+    /* ---------- [列顺序 2026-04-23] 自定义列顺序（localStorage 持久化） ----------
+       关键点：
+       - 存的是 key 数组，不是 col 对象（对象有 requires 函数，JSON 序列化不过去）
+       - 只在用户明确拖过列头后才写入；之前一直读成 null → 用代码里 COLS 默认顺序
+       - 代码里新增列（比如未来加的 "SHA512"）不在保存的顺序里时，自动追加到末尾，
+         不会让用户"升级后看不到新列"；同时如果代码删了列，保存的顺序里的孤儿 key
+         被默默忽略，也不会报错。
+       - requires 过滤放在最后（visibleCols 内），保证"扩展 chip 未勾选"的列不出现。*/
+    const _colOrderKey = 'app_finder_col_order_v1';
+    function _loadColOrder() {
+        try {
+            const raw = localStorage.getItem(_colOrderKey);
+            if (!raw) return null;
+            const arr = JSON.parse(raw);
+            return Array.isArray(arr) && arr.length ? arr : null;
+        } catch { return null; }
+    }
+    function _saveColOrder(order) {
+        try { localStorage.setItem(_colOrderKey, JSON.stringify(order)); } catch {}
+    }
+    function _hasCustomColOrder() { return _loadColOrder() !== null; }
+    function _clearColOrder() {
+        try { localStorage.removeItem(_colOrderKey); } catch {}
+    }
+
+    const visibleCols = () => {
+        const saved = _loadColOrder();
+        let ordered;
+        if (saved) {
+            const keyToCol = new Map(COLS.map(c => [c.key, c]));
+            const seen = new Set();
+            ordered = [];
+            for (const k of saved) {
+                const c = keyToCol.get(k);
+                if (c && !seen.has(k)) { ordered.push(c); seen.add(k); }
+            }
+            // 代码里新增的列（保存顺序里没有）——按默认 COLS 的相对位置补回去
+            for (const c of COLS) {
+                if (!seen.has(c.key)) {
+                    // 找它默认后一个在 ordered 里的列，插到前面；都没有就追加末尾
+                    const idx = COLS.indexOf(c);
+                    let nextVisible = -1;
+                    for (let i = idx + 1; i < COLS.length; i++) {
+                        const pos = ordered.findIndex(x => x.key === COLS[i].key);
+                        if (pos >= 0) { nextVisible = pos; break; }
+                    }
+                    if (nextVisible >= 0) ordered.splice(nextVisible, 0, c);
+                    else ordered.push(c);
+                }
+            }
+        } else {
+            ordered = [...COLS];
+        }
+        return ordered.filter(c => !c.requires || c.requires());
+    };
+
+    /** 基于 visibleCols 的当前顺序，把 src 列移到 dst 之前/之后；同时保持不可见列
+     *  在默认 COLS 中的相对位置。结果 = 完整的 key 列表（含不可见的）写入 localStorage。*/
+    function _reorderColumn(srcKey, dstKey, beforeDst) {
+        if (!srcKey || !dstKey || srcKey === dstKey) return false;
+        // 取当前"完整顺序"（先用 saved，没有就用 COLS 默认）
+        const saved = _loadColOrder();
+        let full;
+        if (saved) {
+            const keyToCol = new Map(COLS.map(c => [c.key, c]));
+            const seen = new Set();
+            full = [];
+            for (const k of saved) {
+                if (keyToCol.has(k) && !seen.has(k)) { full.push(k); seen.add(k); }
+            }
+            for (const c of COLS) if (!seen.has(c.key)) full.push(c.key);
+        } else {
+            full = COLS.map(c => c.key);
+        }
+        const src = full.indexOf(srcKey);
+        if (src < 0) return false;
+        full.splice(src, 1);
+        let dst = full.indexOf(dstKey);
+        if (dst < 0) return false;
+        const insertAt = beforeDst ? dst : dst + 1;
+        full.splice(insertAt, 0, srcKey);
+        _saveColOrder(full);
+        return true;
+    }
 
     function renderCell(col, r) {
         switch (col.key) {
@@ -1789,11 +1897,19 @@
             case 'description': {
                 // [F-介绍列 2026-04-22] 前 5 码点做摘要；>5 补省略号；全文放 data-copy
                 // + title；走全局 .copyable[data-copy] 委托实现点击复制。
+                // [Fix 2026-04-23] 介绍过长时浏览器原生 title 直接不显示（com.zerone.hidesktop 案例）。
+                // title 截断到前 200 码点，超过部分提示用户复制或导出查看完整内容。全文仍走 data-copy。
                 const desc = (r.description || '').trim();
                 if (!desc) return '<span style="color:var(--text-quaternary)">—</span>';
                 const arr = Array.from(desc);
                 const preview = arr.length > 5 ? arr.slice(0, 5).join('') + '…' : desc;
-                return `<span class="v4-desc copyable" data-copy="${esc(desc)}" title="${esc(desc)}\n\n(点击复制全文)">${esc(preview)}</span>`;
+                const TITLE_MAX = 200;
+                const tooLong = arr.length > TITLE_MAX;
+                const titleBody = tooLong ? arr.slice(0, TITLE_MAX).join('') + '…' : desc;
+                const titleHint = tooLong
+                    ? '\n\n(介绍较长，已截断 ' + TITLE_MAX + ' 字预览；点击复制或导出可查看完整内容)'
+                    : '\n\n(点击复制全文)';
+                return `<span class="v4-desc copyable" data-copy="${esc(desc)}" title="${esc(titleBody + titleHint)}">${esc(preview)}</span>`;
             }
             case 'actions':
                 if (!r.incomplete || !r.package_name) return '';
@@ -1803,6 +1919,101 @@
                 </button>`;
         }
         return '';
+    }
+
+    /* ---------- [列顺序 2026-04-23] th 拖拽事件 ----------
+       实现细节：
+       - 只绑一次（_dragEventsBound 标记），thead 节点本身不被 innerHTML 重置，所以委托安全
+       - dragstart 里过滤按钮点击：th 内有 sort/filter 按钮，鼠标按在按钮上不应触发拖
+       - dragover 根据鼠标在目标 th 的左/右半决定"插到前/后"并显示指示线
+       - drop 更新 localStorage 并 showResults 重渲染——重渲染会走 visibleCols 拿新顺序
+       - dragend 清理 class，防止异常退出后残留样式 */
+    let _dragSrcKey = null;
+    let _dragEventsBound = false;
+    function _bindColumnDragOnce() {
+        if (_dragEventsBound) return;
+        const table = document.getElementById('resultTable');
+        if (!table) return;
+        const thead = table.querySelector('thead');
+        if (!thead) return;
+        _dragEventsBound = true;
+
+        const cleanup = () => {
+            _dragSrcKey = null;
+            thead.classList.remove('is-col-dragging');
+            thead.querySelectorAll('.th-dragging, .th-drop-before, .th-drop-after').forEach(el => {
+                el.classList.remove('th-dragging', 'th-drop-before', 'th-drop-after');
+            });
+        };
+
+        thead.addEventListener('dragstart', e => {
+            // 排序↑ / 移除排序× / 平台筛选▾ 按钮不参与拖拽——点它们应触发原来的 click
+            if (e.target.closest('button')) { e.preventDefault(); return; }
+            const th = e.target.closest('th[draggable="true"]');
+            if (!th) return;
+            _dragSrcKey = th.dataset.col;
+            th.classList.add('th-dragging');
+            thead.classList.add('is-col-dragging');
+            try {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', _dragSrcKey); // Firefox 要求必须 setData
+            } catch {}
+        });
+
+        thead.addEventListener('dragover', e => {
+            if (!_dragSrcKey) return;
+            const th = e.target.closest('th[draggable="true"]');
+            if (!th || th.dataset.col === _dragSrcKey) return;
+            e.preventDefault();
+            try { e.dataTransfer.dropEffect = 'move'; } catch {}
+            const rect = th.getBoundingClientRect();
+            const midX = rect.left + rect.width / 2;
+            // 先清理上一次的位置指示（只动不在 src/self 的）
+            thead.querySelectorAll('.th-drop-before, .th-drop-after').forEach(el => {
+                el.classList.remove('th-drop-before', 'th-drop-after');
+            });
+            th.classList.add(e.clientX < midX ? 'th-drop-before' : 'th-drop-after');
+        });
+
+        thead.addEventListener('dragleave', e => {
+            // 只清当前 th 的指示，不动全局（dragover 会重新贴）
+            const th = e.target.closest('th[draggable="true"]');
+            if (th) th.classList.remove('th-drop-before', 'th-drop-after');
+        });
+
+        thead.addEventListener('drop', e => {
+            if (!_dragSrcKey) return;
+            const th = e.target.closest('th[draggable="true"]');
+            if (!th) { cleanup(); return; }
+            e.preventDefault();
+            if (th.dataset.col === _dragSrcKey) { cleanup(); return; }
+            const rect = th.getBoundingClientRect();
+            const before = e.clientX < (rect.left + rect.width / 2);
+            const changed = _reorderColumn(_dragSrcKey, th.dataset.col, before);
+            cleanup();
+            if (changed) showResults();
+        });
+
+        thead.addEventListener('dragend', cleanup);
+    }
+
+    let _resetColBtnBound = false;
+    function _bindResetColBtnOnce() {
+        if (_resetColBtnBound) return;
+        const btn = document.getElementById('btnResetColOrder');
+        if (!btn) return;
+        _resetColBtnBound = true;
+        btn.addEventListener('click', () => {
+            if (!_hasCustomColOrder()) return;
+            _clearColOrder();
+            showResults();
+        });
+    }
+    function _updateResetColBtn() {
+        _bindResetColBtnOnce();   // 第一次进 showResults 时顺便绑 click
+        const btn = document.getElementById('btnResetColOrder');
+        if (!btn) return;
+        btn.hidden = !_hasCustomColOrder();
     }
 
     function pinDisplayOrder() {
@@ -1858,7 +2069,11 @@
         const cols = visibleCols();
         const thRow = $('#resultHeadRow');
         thRow.innerHTML = cols.map(c => {
-            if (!c.sortable) return `<th data-col="${c.key}">${esc(c.label)}</th>`;
+            // [列顺序 2026-04-23] icon / actions 列不可拖——icon 是视觉锚（习惯在最左），
+            //   actions 是控件列（行操作按钮），拖了没意义还易误拖。其他列都 draggable。
+            const canDrag = c.key !== 'icon' && c.key !== 'actions';
+            const dragAttr = canDrag ? ' draggable="true"' : '';
+            if (!c.sortable) return `<th data-col="${c.key}"${dragAttr}>${esc(c.label)}</th>`;
             const idx = sortKeys.findIndex(k => k.col === c.key);
             let ind = '<span class="sort-ind">⇅</span>';
             let ctrls = '';
@@ -1876,8 +2091,12 @@
                 const active = filterPlatform !== 'all';
                 filter = `<button class="th-filter-btn${active ? ' active' : ''}" data-filter-col="platform" title="筛选平台">▾</button>`;
             }
-            return `<th class="sortable" data-col="${c.key}">${esc(c.label)} ${ind}${ctrls}${filter}</th>`;
+            return `<th class="sortable" data-col="${c.key}"${dragAttr}>${esc(c.label)} ${ind}${ctrls}${filter}</th>`;
         }).join('');
+        // 每次重渲染完 thead 后确保拖拽事件就位 + 重置按钮显隐同步
+        _bindColumnDragOnce();
+        _updateResetColBtn();
+        _applyColumnWidths(cols);  // [列宽动态分配 2026-04-24] thead 重渲染立刻算宽度，避免右侧留白
 
         const rows = sortedRows();
         let lastPkg = null;
@@ -2286,6 +2505,91 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goHome(); }
     });
 
+    /* ---------- [列宽动态分配 2026-04-24] 按可见列动态算列宽 ----------
+       痛点：原本列宽用固定百分比（app_name 12% / package_name 16% / ...），默认只显示
+       少量列时，百分比总和 < 100%，右侧留白一大块。
+       方案：JS 按可见列数 × 列权重 重新分配空间，写到 th.style.width（inline 覆盖 CSS
+       百分比）；table-layout:fixed 只认 thead 第一行列宽，td 自动跟随。
+       - 固定列（图标/平台/操作）保持 px，不参与动态分配
+       - 可变列：按 weight 比例分 (availW)，再 clamp 到 [min, max]
+       - 两轮 rebalance 让总宽贴近 availW（避免右边留白 / 压垮）
+       - 列宽权重按内容自然宽度给：包名最长 (1.7) > 应用名/SHA256 (1.2) > 商店/APK (1.1)
+         > SHA1 (0.9) > 分类/介绍 (0.6，后者只显示 5 字符)
+       - window resize 时 RAF 防抖重算
+       ⚠️ 改 thead 要先过 feedback_table_header.md 的 7 条 checklist —— 本函数只动 width，
+       不动 overflow / position / z-index / sticky-top-2。 */
+    const COL_FIXED_PX = { icon: 52, platform: 72, actions: 56 };
+    const COL_WEIGHT = {
+        app_name: 1.2, package_name: 1.7, category: 0.6,
+        store_url: 1.1, download_url: 1.1,
+        sha1: 0.9, sha256: 1.2, description: 0.6,
+    };
+    const COL_MIN_PX = {
+        app_name: 110, package_name: 150, category: 70,
+        store_url: 130, download_url: 130,
+        sha1: 90, sha256: 110, description: 70,
+    };
+    const COL_MAX_PX = {
+        app_name: 220, package_name: 340, category: 130,
+        store_url: 260, download_url: 260,
+        sha1: 200, sha256: 280, description: 110,
+    };
+    function _applyColumnWidths(cols) {
+        const scroller = document.querySelector('.v4-table-scroll');
+        if (!scroller) return;
+        const tableWidth = scroller.clientWidth;
+        if (tableWidth <= 0) return;
+        const fixedCols = cols.filter(c => COL_FIXED_PX[c.key] != null);
+        const flexCols  = cols.filter(c => COL_FIXED_PX[c.key] == null);
+        const fixedTotal = fixedCols.reduce((s, c) => s + COL_FIXED_PX[c.key], 0);
+        const availW = Math.max(0, tableWidth - fixedTotal);
+
+        const sumW = flexCols.reduce((s, c) => s + (COL_WEIGHT[c.key] || 1), 0) || 1;
+        const W = {};
+        flexCols.forEach(c => {
+            W[c.key] = availW * (COL_WEIGHT[c.key] || 1) / sumW;
+        });
+        const MIN = k => COL_MIN_PX[k] || 60;
+        const MAX = k => COL_MAX_PX[k] || 400;
+        flexCols.forEach(c => {
+            W[c.key] = Math.max(MIN(c.key), Math.min(MAX(c.key), W[c.key]));
+        });
+        // rebalance：让总宽贴近 availW（避免右侧留白或溢出）
+        for (let iter = 0; iter < 3; iter++) {
+            const sumNow = flexCols.reduce((s, c) => s + W[c.key], 0);
+            const delta = availW - sumNow;
+            if (Math.abs(delta) < 1) break;
+            if (delta > 0) {
+                const growable = flexCols.filter(c => W[c.key] < MAX(c.key));
+                if (!growable.length) break;
+                const sumGW = growable.reduce((s, c) => s + (COL_WEIGHT[c.key] || 1), 0) || 1;
+                growable.forEach(c => {
+                    const share = delta * (COL_WEIGHT[c.key] || 1) / sumGW;
+                    W[c.key] = Math.min(MAX(c.key), W[c.key] + share);
+                });
+            } else {
+                const shrinkable = flexCols.filter(c => W[c.key] > MIN(c.key));
+                if (!shrinkable.length) break;
+                const sumSW = shrinkable.reduce((s, c) => s + (COL_WEIGHT[c.key] || 1), 0) || 1;
+                shrinkable.forEach(c => {
+                    const share = -delta * (COL_WEIGHT[c.key] || 1) / sumSW;
+                    W[c.key] = Math.max(MIN(c.key), W[c.key] - share);
+                });
+            }
+        }
+
+        // 写入 thead 第一行 th —— table-layout:fixed 只认这一行
+        document.querySelectorAll('#resultHeadRow th').forEach(th => {
+            const key = th.dataset.col;
+            if (COL_FIXED_PX[key] != null) {
+                th.style.width = COL_FIXED_PX[key] + 'px';
+            } else if (W[key] != null) {
+                th.style.width = Math.round(W[key]) + 'px';
+            }
+        });
+    }
+    window._applyColumnWidths = _applyColumnWidths;  // 暴露给 resize hook
+
     /* ---------- Sticky 高度测量（搜索头→toolbar→thead 三层） ---------- */
     window._measureStickyHeights = function() {
         const root = document.documentElement;
@@ -2308,6 +2612,18 @@
     const _tbEl = document.querySelector('.v4-tb');
     if (_tbEl) _ro.observe(_tbEl);
     window.addEventListener('resize', window._measureStickyHeights);
+
+    // [列宽动态分配 2026-04-24] 视口变化时 RAF 防抖重算列宽
+    let _colWidthsRaf = 0;
+    window.addEventListener('resize', () => {
+        if (_colWidthsRaf) cancelAnimationFrame(_colWidthsRaf);
+        _colWidthsRaf = requestAnimationFrame(() => {
+            _colWidthsRaf = 0;
+            if ($('#v4Root').classList.contains('has-results')) {
+                _applyColumnWidths(visibleCols());
+            }
+        });
+    });
 
     /* ---------- Google 式折叠输入 ----------
        核心规则（从用户视角出发）：

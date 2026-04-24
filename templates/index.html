@@ -126,6 +126,7 @@
                         <div class="v4-adv-chips" data-group="opts">
                             <button type="button" class="v4-chip on" data-value="extended" title="例：只输了 iOS bundle，但拿到 App 名后自动反查安卓">跨端补全</button>
                             <button type="button" class="v4-chip on" data-value="keep" title="关闭后查询完成自动清空输入">保留输入</button>
+                            <button type="button" class="v4-chip on" data-value="enter_query" title="开启后按 Enter 直接查询；换行用 Shift+Enter。始终保留 ⌘/Ctrl+Enter">Enter 键查询</button>
                         </div>
                     </div>
                     <button type="button" class="btn ghost sm v4-adv-reset" id="btnResetAdv">重置</button>
@@ -171,6 +172,12 @@
                 <button class="v4-row-retry" id="btnRetryIncomplete" hidden>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
                     重查不完整
+                </button>
+                <!-- [列顺序 2026-04-23] 用户拖动过列头后才出现；点击恢复代码里定义的默认顺序。
+                     默认藏起来避免未动过列顺序的人看到陌生按钮。 -->
+                <button class="btn sm" id="btnResetColOrder" hidden title="把列顺序恢复成默认">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+                    重置列顺序
                 </button>
                 <button class="btn sm" id="btnCopyAll">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
