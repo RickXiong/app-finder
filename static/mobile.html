@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#1a1a1a" media="(prefers-color-scheme: dark)" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<title>AppLookup · 移动版</title>
+<link rel="icon" href="/static/favicon-v4.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="/static/mobile.css" />
+</head>
+<body>
+<div class="m-root" id="mRoot" data-view="landing">
+
+  <!-- ===== View: Landing ===== -->
+  <section class="m-view m-view-landing" data-view="landing">
+    <header class="m-topbar">
+      <button class="m-topbar-icon" id="btnMenu" aria-label="历史记录">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+      </button>
+      <div class="m-topbar-title">
+        <span class="m-logo-a">A</span><span class="m-logo-p">p</span><span class="m-logo-p2">p</span><span class="m-logo-l">L</span><span class="m-logo-o">o</span><span class="m-logo-o2">o</span><span class="m-logo-k">k</span><span class="m-logo-u">u</span><span class="m-logo-p3">p</span>
+      </div>
+      <button class="m-topbar-icon" id="btnTheme" aria-label="切换主题">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      </button>
+    </header>
+
+    <main class="m-landing-body">
+      <h1 class="m-landing-title">查 App 信息</h1>
+      <p class="m-landing-sub">贴包名（Android）或 Bundle ID（iOS），一行一个</p>
+
+      <div class="m-input-wrap">
+        <textarea
+          id="txtInput"
+          class="m-input"
+          rows="3"
+          placeholder="com.tencent.mm&#10;com.taobao.taobao&#10;..."
+          autocomplete="off"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+          inputmode="text"
+        ></textarea>
+        <button class="m-input-clear" id="btnClear" aria-label="清空" hidden>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="m-tip" id="mTip">
+        粘贴长文也行，自动按行/逗号/空格切分
+      </div>
+
+      <div class="m-examples">
+        <span class="m-examples-label">示例：</span>
+        <button class="m-chip" data-fill="com.tencent.mm">com.tencent.mm</button>
+        <button class="m-chip" data-fill="com.taobao.taobao">com.taobao.taobao</button>
+        <button class="m-chip" data-fill="com.zhiliaoapp.musically">com.zhiliaoapp.musically</button>
+      </div>
+    </main>
+
+    <footer class="m-landing-footer">
+      <button class="m-btn m-btn-primary" id="btnSubmit" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <span>查 询</span>
+      </button>
+    </footer>
+  </section>
+
+  <!-- ===== View: Loading（流式查询中，结果会陆续上来） ===== -->
+  <section class="m-view m-view-loading" data-view="loading" hidden>
+    <header class="m-topbar">
+      <button class="m-topbar-icon" id="btnLoadingBack" aria-label="返回">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="m-topbar-title">
+        <span id="loadingCounter">0 / 0</span>
+      </div>
+      <span class="m-topbar-icon m-topbar-spacer" aria-hidden="true"></span>
+    </header>
+
+    <div class="m-loading-bar">
+      <div class="m-loading-bar-fill" id="loadingBarFill" style="width: 0%"></div>
+    </div>
+
+    <div class="m-loading-status" id="loadingStatus">
+      <span class="m-spinner" aria-hidden="true"></span>
+      <span class="m-loading-text">正在查询…</span>
+    </div>
+
+    <!-- 流式结果就先长在这（同 results 容器结构），查询中点点滴滴的卡片 -->
+    <main class="m-list" id="loadingList"></main>
+
+    <footer class="m-loading-footer">
+      <button class="m-btn m-btn-ghost" id="btnCancel">取消查询</button>
+    </footer>
+  </section>
+
+  <!-- ===== View: Results ===== -->
+  <section class="m-view m-view-results" data-view="results" hidden>
+    <header class="m-topbar">
+      <button class="m-topbar-icon" id="btnResultsBack" aria-label="返回">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="m-topbar-title" id="resultsTitle">结果</div>
+      <button class="m-topbar-icon" id="btnCopyAll" aria-label="复制全部">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+    </header>
+
+    <div class="m-results-summary" id="resultsSummary">iOS 0 · Android 0</div>
+
+    <main class="m-list" id="resultsList"></main>
+
+    <div class="m-empty" id="resultsEmpty" hidden>
+      <div class="m-empty-icon">🤔</div>
+      <div class="m-empty-title">还没有结果</div>
+      <div class="m-empty-sub">查询完成后会显示在这里</div>
+    </div>
+  </section>
+
+  <!-- ===== Drawer: History ===== -->
+  <aside class="m-drawer" id="drawer" hidden aria-hidden="true">
+    <div class="m-drawer-mask" id="drawerMask"></div>
+    <div class="m-drawer-panel" role="dialog" aria-label="历史记录">
+      <header class="m-drawer-header">
+        <h2 class="m-drawer-title">历史</h2>
+        <button class="m-topbar-icon" id="btnDrawerClose" aria-label="关闭">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </header>
+      <div class="m-drawer-actions">
+        <button class="m-btn m-btn-ghost m-btn-sm" id="btnHistClearAll">清空全部</button>
+      </div>
+      <div class="m-drawer-body" id="historyList"></div>
+      <div class="m-empty m-empty-sm" id="historyEmpty">
+        <div class="m-empty-icon">📭</div>
+        <div class="m-empty-title">没有历史记录</div>
+        <div class="m-empty-sub">查询过的会自动保存在这台手机上</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===== Toast ===== -->
+  <div class="m-toast" id="toast" hidden></div>
+
+</div>
+
+<script src="/static/mobile.js" defer></script>
+</body>
+</html>
